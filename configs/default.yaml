@@ -1,0 +1,44 @@
+# Default MAPPO hyperparameters for spatial competition
+
+# Training
+num_envs: 16
+rollout_length: 512
+total_updates: 2000
+seed: 42
+
+# PPO
+gamma: 0.99
+gae_lambda: 0.95
+ppo_epochs: 6
+num_minibatches: 8
+clip_epsilon: 0.2
+value_coef: 0.20
+entropy_coef: 0.03
+
+# Entropy coefficient decay
+entropy_coef_start: 0.03
+entropy_coef_end: 0.001
+entropy_coef_anneal_frac: 0.8
+
+# Softmax buyer-choice temperature annealing
+buyer_choice_temp_start: 2.0
+buyer_choice_temp_end: 0.001
+buyer_choice_temp_anneal_frac: 0.8
+
+# Optimization
+learning_rate: 0.0003
+max_grad_norm: 0.5
+
+# Network architecture
+hidden_dims: [256, 256]
+
+# Logging
+log_interval: 50
+eval_interval: 500
+save_interval: 1000
+use_tensorboard: true
+log_dir: "results"
+
+# Evaluation
+eval_episodes: 10
+deterministic_eval: true

@@ -1,0 +1,42 @@
+[tools]
+poetry = "latest"
+
+[tasks.install]
+description = "Install production dependencies"
+run = "poetry install --only main"
+
+[tasks.dev-install]
+description = "Install all dependencies including dev"
+run = "poetry install --with dev"
+
+[tasks.lint]
+description = "Run linting with ruff"
+run = "poetry run ruff check ."
+
+[tasks.format]
+description = "Format code with ruff"
+run = "poetry run ruff format ."
+
+[tasks.type-check]
+description = "Run type checking with mypy"
+run = "poetry run mypy spatial_competition_jax/"
+
+[tasks.test]
+description = "Run tests"
+run = "poetry run pytest"
+
+[tasks.clean]
+description = "Clean up cache and temporary files"
+run = """
+find . -type d -name "__pycache__" -exec rm -rf {} +
+find . -type f -name "*.pyc" -delete
+rm -rf .coverage htmlcov/ .pytest_cache/ .mypy_cache/ .ruff_cache/
+"""
+
+[tasks.pre-commit]
+description = "Install pre-commit hooks"
+run = "poetry run pre-commit install"
+
+[tasks.check]
+description = "Run all checks (lint, type-check, test)"
+depends = ["lint", "type-check", "test"]

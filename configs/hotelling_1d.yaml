@@ -1,0 +1,17 @@
+# 1D Hotelling (Linear City) environment configuration
+
+# Environment
+dimensions: 1
+num_sellers: 2
+max_price: 10.0
+include_quality: false
+max_step_size: 0.1
+movement_cost: 0.0
+transport_cost: 5.0
+new_buyers_per_step: 20
+max_env_steps: 100
+space_resolution: 50
+buyer_choice_temperature: 1.0
+
+# Include parent defaults
+_parent: default.yaml

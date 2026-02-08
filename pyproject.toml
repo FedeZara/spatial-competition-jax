@@ -1,0 +1,82 @@
+[project]
+name = "spatial-competition-jax"
+version = "0.1.0"
+description = "JAX-native Spatial Competition Environment for Multi-Agent Reinforcement Learning"
+authors = [{ name = "FedeZara", email = "fedezara2001@gmail.com" }]
+readme = "README.md"
+license = { file = "LICENSE" }
+keywords = [
+    "spatial competition",
+    "jax",
+    "multi-agent",
+    "reinforcement learning",
+    "environment",
+]
+
+[tool.poetry]
+packages = [{ include = "spatial_competition_jax" }]
+
+[tool.poetry.dependencies]
+python = ">=3.10,<3.13"
+jax = ">=0.4.20"
+jaxlib = ">=0.4.20"
+flax = ">=0.8.0"
+chex = ">=0.1.80"
+optax = ">=0.1.7"
+
+[tool.poetry.group.marl.dependencies]
+pyyaml = ">=6.0"
+tensorboardX = ">=2.6"
+
+[tool.poetry.group.dev.dependencies]
+pytest = ">=8.0.0,<9.0.0"
+ruff = ">=0.13.0,<0.14.0"
+mypy = ">=1.18.2,<2.0.0"
+pre-commit = ">=3.0.0,<4.0.0"
+isort = ">=6.0.1,<7.0.0"
+
+[tool.poetry.group.render.dependencies]
+pygame = ">=2.6.0"
+
+[build-system]
+requires = ["poetry-core>=2.0.0,<3.0.0"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["F", "E", "I"]
+ignore = ["E501"]
+
+[tool.isort]
+profile = "black"
+
+[tool.mypy]
+disallow_untyped_defs = true
+disallow_any_unimported = false
+no_implicit_optional = true
+check_untyped_defs = true
+warn_return_any = true
+show_error_codes = true
+warn_unused_ignores = true
+
+[[tool.mypy.overrides]]
+module = [
+    "jax.*",
+    "jaxlib.*",
+    "flax.*",
+    "chex.*",
+    "optax.*",
+    "pygame.*",
+    "tensorboardX.*",
+    "yaml.*",
+]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_functions = ["test_*"]
+addopts = ["--strict-markers", "--strict-config"]

@@ -86,6 +86,21 @@ def _entropy_beta(
 
 
 # ---------------------------------------------------------------------------
+# Symlog / Symexp value transforms (DreamerV3-style)
+# ---------------------------------------------------------------------------
+
+
+def symlog(x: jnp.ndarray) -> jnp.ndarray:
+    """Symmetric logarithmic compression: sign(x) * ln(1 + |x|)."""
+    return jnp.sign(x) * jnp.log1p(jnp.abs(x))
+
+
+def symexp(x: jnp.ndarray) -> jnp.ndarray:
+    """Inverse of :func:`symlog`: sign(x) * (exp(|x|) - 1)."""
+    return jnp.sign(x) * (jnp.exp(jnp.abs(x)) - 1.0)
+
+
+# ---------------------------------------------------------------------------
 # Tanh-Normal helpers
 # ---------------------------------------------------------------------------
 
@@ -337,46 +352,3 @@ def deterministic_actions(
 
     actions = jnp.concatenate([movement_actions, bounded_actions], axis=-1)
     return actions, values
-
-
-def evaluate_actions(
-    network: SharedActorCritic,
-    params: dict,
-    state: jnp.ndarray,
-    actions: jnp.ndarray,
-) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
-    """Evaluate actions under the current policy.
-
-    Args:
-        state: ``(..., state_dim)``
-        actions: ``(..., A, action_dim)`` – movement in ``[-1, 1]``,
-            bounded in ``(0, 1)``.
-
-    Returns:
-        ``(log_probs, entropy, values)`` each ``(..., A)``.
-    """
-    gauss_means, gauss_log_stds, beta_alphas, beta_betas, values = network.apply(params, state)  # type: ignore[misc]
-    gauss_stds = jnp.exp(gauss_log_stds)
-
-    move_dim = network.movement_dim
-
-    # Split stored actions
-    movement_actions = actions[..., :move_dim]
-    bounded_actions = actions[..., move_dim:]
-
-    # --- Gaussian log-prob (movement) ---
-    clipped_move = jnp.clip(movement_actions, -1.0 + EPS, 1.0 - EPS)
-    raw_movement = jnp.arctanh(clipped_move)
-    log_prob_movement = _log_prob_tanh_normal(gauss_means, gauss_stds, raw_movement, movement_actions)
-
-    # --- Beta log-prob (bounded) ---
-    log_prob_bounded = _log_prob_beta(beta_alphas, beta_betas, bounded_actions)
-
-    log_probs = log_prob_movement + log_prob_bounded
-
-    # --- Entropy ---
-    entropy_gauss = _entropy_gaussian(gauss_log_stds)
-    entropy_beta = _entropy_beta(beta_alphas, beta_betas)
-    entropy = entropy_gauss + entropy_beta
-
-    return log_probs, entropy, values

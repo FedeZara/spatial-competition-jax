@@ -48,7 +48,7 @@ class TrainConfig:
     num_minibatches: int = 8
     clip_epsilon: float = 0.2
     value_coef: float = 0.5
-    entropy_coef: float = 0.005
+    entropy_coef: float = 0.01
 
     # Optimization
     learning_rate: float = 3e-4

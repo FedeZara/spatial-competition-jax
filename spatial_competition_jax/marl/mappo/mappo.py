@@ -29,6 +29,8 @@ from spatial_competition_jax.marl.mappo.networks import (
     _entropy_gaussian,
     _log_prob_beta,
     _log_prob_tanh_normal,
+    symexp,
+    symlog,
 )
 from spatial_competition_jax.marl.training_wrapper import TrainingWrapper
 
@@ -244,10 +246,12 @@ class MAPPO:
             key, step_key, k_gauss, k_beta = jax.random.split(key, 4)
 
             # Forward pass – get distribution params and values
-            gauss_means, gauss_log_stds, beta_alphas, beta_betas, values = self.network.apply(  # type: ignore[misc]
+            gauss_means, gauss_log_stds, beta_alphas, beta_betas, values_symlog = self.network.apply(  # type: ignore[misc]
                 train_state.params,
                 global_states,
             )
+            # Critic outputs in symlog space; decompress to real scale for GAE
+            values = symexp(values_symlog)
             gauss_stds = jnp.exp(gauss_log_stds)
 
             # --- Sample movement (tanh-squashed Gaussian) ---
@@ -293,13 +297,14 @@ class MAPPO:
             length=self.rollout_length,
         )
 
-        # Bootstrap value
-        _, _, _, _, bootstrap_values = self.network.apply(  # type: ignore[misc]
+        # Bootstrap value (decompress from symlog to real scale)
+        _, _, _, _, bootstrap_values_symlog = self.network.apply(  # type: ignore[misc]
             train_state.params,
             final_global_states,
         )
+        bootstrap_values = symexp(bootstrap_values_symlog)
 
-        # GAE
+        # GAE (operates in real scale)
         advantages, returns = compute_gae(
             transitions.rewards,
             transitions.values,
@@ -309,11 +314,10 @@ class MAPPO:
             self.gae_lambda,
         )
 
-        # Normalise advantages (per agent) and returns
+        # Normalise advantages (per agent)
         advantages = normalize_advantages(advantages, per_agent=True)
-        ret_mean = returns.mean()
-        ret_std = returns.std() + 1e-8
-        returns = (returns - ret_mean) / ret_std
+        # Compress returns to symlog space to match critic output scale
+        returns = symlog(returns)
 
         return transitions, advantages, returns, final_env_states, final_global_states
 

@@ -13,9 +13,9 @@ ppo_epochs: 6
 num_minibatches: 4
 clip_epsilon: 0.2
 value_coef: 0.50
-entropy_coef: 0.03
 
-# Entropy coefficient decay
+# Entropy coefficient decay (entropy_coef is the fallback when annealing is off)
+entropy_coef: 0.01
 entropy_coef_start: 0.01
 entropy_coef_end: 0.001
 entropy_coef_anneal_frac: 0.8

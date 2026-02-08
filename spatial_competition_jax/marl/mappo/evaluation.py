@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import functools
+from typing import Any
+
 import jax
 import jax.numpy as jnp
-import numpy as np
 
 from spatial_competition_jax.marl.mappo.networks import (
     SharedActorCritic,
@@ -12,6 +14,97 @@ from spatial_competition_jax.marl.mappo.networks import (
     sample_actions,
 )
 from spatial_competition_jax.marl.training_wrapper import TrainingWrapper
+
+# ---------------------------------------------------------------------------
+# JIT-compiled, vmapped evaluation kernel
+# ---------------------------------------------------------------------------
+
+
+@functools.partial(jax.jit, static_argnums=(0, 1, 4, 5))
+def _eval_episodes_jit(
+    network: SharedActorCritic,
+    wrapper: TrainingWrapper,
+    params: Any,
+    keys: jnp.ndarray,
+    deterministic: bool,
+    use_temp: bool,
+    temperature: jnp.ndarray,
+) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+    """Run all evaluation episodes in parallel.
+
+    Uses ``jax.lax.scan`` for the inner step loop and ``jax.vmap``
+    across episodes so the entire evaluation is a single fused kernel.
+
+    Args:
+        network: ``SharedActorCritic`` (static).
+        wrapper: ``TrainingWrapper`` (static).
+        params: Network parameters.
+        keys: ``(num_episodes, 2)`` PRNG keys.
+        deterministic: Whether to use deterministic actions (static).
+        use_temp: Whether temperature is used by the env (static).
+        temperature: Buyer-choice temperature (scalar array).
+
+    Returns:
+        ``(total_rewards, final_positions, final_prices)`` with shapes
+        ``(E, A)``, ``(E, S, D)``, ``(E, S)`` where *E* = num_episodes.
+    """
+    max_steps = wrapper.env.max_env_steps
+
+    def run_one(key: jnp.ndarray) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+        reset_key, step_key = jax.random.split(key)
+        global_state, env_state = wrapper.reset(reset_key)
+
+        def scan_fn(
+            carry: tuple[Any, jnp.ndarray, jnp.ndarray],
+            _: None,
+        ) -> tuple[tuple[Any, jnp.ndarray, jnp.ndarray], jnp.ndarray]:
+            env_state, global_state, sk = carry
+            sk, action_key = jax.random.split(sk)
+
+            state_batch = global_state[None, ...]  # add batch dim
+
+            if deterministic:
+                actions, _ = deterministic_actions(network, params, state_batch)
+            else:
+                actions, _, _ = sample_actions(network, params, state_batch, action_key)
+            actions = actions[0]  # remove batch dim → (A, action_dim)
+
+            if use_temp:
+                next_gs, next_es, rewards, _dones = wrapper.step(
+                    sk, env_state, actions, temperature=temperature,
+                )
+            else:
+                next_gs, next_es, rewards, _dones = wrapper.step(
+                    sk, env_state, actions,
+                )
+
+            return (next_es, next_gs, sk), rewards
+
+        (final_env_state, _, _), all_rewards = jax.lax.scan(
+            scan_fn,
+            (env_state, global_state, step_key),
+            None,
+            length=max_steps,
+        )
+
+        # all_rewards: (max_steps, num_agents) → (num_agents,)
+        total_reward = all_rewards.sum(axis=0)
+
+        positions = (
+            final_env_state.seller_positions.astype(jnp.float32)
+            / wrapper.space_resolution
+        )
+        prices = final_env_state.seller_prices
+
+        return total_reward, positions, prices
+
+    # Vectorise across episodes
+    return jax.vmap(run_one)(keys)
+
+
+# ---------------------------------------------------------------------------
+# Public API (unchanged signature)
+# ---------------------------------------------------------------------------
 
 
 def evaluate_policy(
@@ -25,8 +118,8 @@ def evaluate_policy(
 ) -> dict[str, float]:
     """Evaluate a trained policy.
 
-    Runs single-environment episodes (not vmapped) for
-    deterministic evaluation.
+    Runs *num_episodes* episodes in parallel (vmapped) with
+    ``jax.lax.scan`` for the inner step loop — fully JIT-compiled.
 
     Args:
         network: ``SharedActorCritic`` module.
@@ -44,64 +137,28 @@ def evaluate_policy(
     if key is None:
         key = jax.random.PRNGKey(0)
 
-    episode_rewards: list[float] = []
-    episode_lengths: list[int] = []
-    final_positions: list[float] = []
-    final_prices: list[float] = []
+    use_temp = wrapper.env.buyer_choice_temperature is not None
+    temp_arr = jnp.float32(temperature if temperature is not None else 0.0)
+    keys = jax.random.split(key, num_episodes)
 
-    for _ in range(num_episodes):
-        key, reset_key, step_key = jax.random.split(key, 3)
+    total_rewards, all_positions, all_prices = _eval_episodes_jit(
+        network, wrapper, params, keys, deterministic, use_temp, temp_arr,
+    )
 
-        global_state, env_state = wrapper.reset(reset_key)
-
-        episode_reward = jnp.zeros(wrapper.num_agents)
-        episode_length = 0
-        done = False
-
-        while not done:
-            step_key, action_key = jax.random.split(step_key)
-
-            state_batch = global_state[None, ...]  # add batch dim
-
-            if deterministic:
-                actions, _ = deterministic_actions(network, params, state_batch)
-            else:
-                actions, _, _ = sample_actions(network, params, state_batch, action_key)
-
-            actions = actions[0]  # remove batch dim → (A, action_dim)
-
-            global_state, env_state, rewards, dones = wrapper.step(
-                step_key,
-                env_state,
-                actions,
-                temperature=temperature,
-            )
-
-            episode_reward = episode_reward + rewards
-            episode_length += 1
-            done = bool(dones[0])
-
-        episode_rewards.append(float(episode_reward.sum()))
-        episode_lengths.append(episode_length)
-
-        # Extract final seller info
-        positions = env_state.seller_positions.astype(jnp.float32) / wrapper.space_resolution
-        prices = env_state.seller_prices
-
-        for i in range(wrapper.num_agents):
-            final_positions.append(float(positions[i, 0]))
-            final_prices.append(float(prices[i]))
+    # total_rewards: (num_episodes, num_agents)
+    episode_rewards = total_rewards.sum(axis=-1)  # (num_episodes,)
 
     results: dict[str, float] = {
-        "eval_reward_mean": float(np.mean(episode_rewards)),
-        "eval_reward_std": float(np.std(episode_rewards)),
-        "eval_length_mean": float(np.mean(episode_lengths)),
-        "eval_position_mean": float(np.mean(final_positions)),
-        "eval_price_mean": float(np.mean(final_prices)),
+        "eval_reward_mean": float(episode_rewards.mean()),
+        "eval_reward_std": float(episode_rewards.std()),
+        "eval_length_mean": float(wrapper.env.max_env_steps),
+        "eval_position_mean": float(all_positions[..., 0].mean()),
+        "eval_price_mean": float(all_prices.mean()),
     }
 
     if wrapper.num_agents == 2:
-        distances = [abs(final_positions[i] - final_positions[i + 1]) for i in range(0, len(final_positions), 2)]
-        results["eval_seller_distance"] = float(np.mean(distances))
+        # all_positions: (E, 2, D) → distance between agent 0 and 1
+        distances = jnp.abs(all_positions[:, 0, 0] - all_positions[:, 1, 0])
+        results["eval_seller_distance"] = float(distances.mean())
 
     return results

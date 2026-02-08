@@ -231,6 +231,9 @@ class SharedActorCritic(nn.Module):
                 kernel_init=orthogonal(0.01),
                 name=f"beta_beta_{i}",
             )(features)
+            # Clamp raws before softplus to avoid bfloat16 overflow
+            b_alpha_raw = jnp.clip(b_alpha_raw, -20.0, 20.0)
+            b_beta_raw = jnp.clip(b_beta_raw, -20.0, 20.0)
             # softplus + 1 ensures alpha, beta > 1  (unimodal)
             b_alpha = nn.softplus(b_alpha_raw) + 1.0
             b_beta = nn.softplus(b_beta_raw) + 1.0

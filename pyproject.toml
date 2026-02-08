@@ -18,8 +18,7 @@ packages = [{ include = "spatial_competition_jax" }]
 
 [tool.poetry.dependencies]
 python = ">=3.10,<3.13"
-jax = ">=0.4.20"
-jaxlib = ">=0.4.20"
+jax = { version = ">=0.4.20", extras = ["cuda12"] }
 flax = ">=0.8.0"
 chex = ">=0.1.80"
 optax = ">=0.1.7"

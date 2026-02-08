@@ -39,7 +39,7 @@ def main() -> None:
         max_env_steps=500,
         movement_cost=0.1,
         production_cost_factor=0.0,
-        transportation_cost_norm=2.0,
+        transportation_cost_norm=1.0,
     )
 
     renderer = SpatialCompetitionRenderer(env)

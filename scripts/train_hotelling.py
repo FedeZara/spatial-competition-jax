@@ -14,6 +14,7 @@ from spatial_competition_jax.marl.mappo.evaluation import evaluate_policy
 from spatial_competition_jax.marl.mappo.mappo import MAPPO, linear_anneal
 from spatial_competition_jax.marl.training_wrapper import TrainingWrapper
 from spatial_competition_jax.marl.utils.checkpoints import save_checkpoint
+from spatial_competition_jax.marl.utils.device import resolve_device
 from spatial_competition_jax.marl.utils.logging import Logger
 
 
@@ -31,6 +32,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--log-dir", type=str, default=None, help="Override log directory")
     parser.add_argument("--experiment-name", type=str, default=None)
     parser.add_argument("--no-tensorboard", action="store_true")
+    parser.add_argument(
+        "--device",
+        type=str,
+        default=None,
+        help=(
+            "JAX device to use, e.g. 'cpu', 'gpu', 'gpu:0', 'gpu:1', 'tpu'. "
+            "Defaults to JAX default (first available accelerator)."
+        ),
+    )
 
     return parser.parse_args()
 
@@ -38,6 +48,9 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     """Run the training loop."""
     args = parse_args()
+
+    # ── device selection ───────────────────────────────────────────────
+    device = resolve_device(args.device)
 
     # ── config ─────────────────────────────────────────────────────────
     config_path = Path(__file__).parent.parent / args.config
@@ -72,12 +85,25 @@ def main() -> None:
     print("MAPPO Training (JAX)")
     print("=" * 60)
     print(f"Experiment: {experiment_name}")
+    print(f"Device:     {device}")
     print(f"Backend:    {jax.default_backend()}")
     print(f"Num envs:   {config.train.num_envs}")
     print(f"Rollout:    {config.train.rollout_length}")
     print(f"Updates:    {config.train.total_updates}")
     print("=" * 60)
 
+    # All array creation and JIT compilation is scoped to *device*.
+    with jax.default_device(device):
+        _train(args, config, logger, experiment_name)
+
+
+def _train(
+    args: argparse.Namespace,
+    config: Config,
+    logger: Logger,
+    experiment_name: str,
+) -> None:
+    """Inner training body – runs inside ``jax.default_device``."""
     # ── environment wrapper ────────────────────────────────────────────
     wrapper = TrainingWrapper(
         num_sellers=config.env.num_sellers,
@@ -120,6 +146,10 @@ def main() -> None:
         num_minibatches=config.train.num_minibatches,
         seed=config.train.seed,
     )
+
+    # Verify all initial arrays landed on the chosen device.
+    _check_device = jax.tree.leaves(agent.train_state.params)[0]
+    print(f"Params on:  {_check_device.devices()}")
 
     # ── annealing setup ────────────────────────────────────────────────
     use_temp_anneal = (

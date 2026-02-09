@@ -1,4 +1,4 @@
-# 1D Hotelling with L2 (Euclidean) distance
+# 1D Hotelling with quadratic transport costs (d'Aspremont et al., 1979)
 
 # Environment
 dimensions: 1
@@ -9,6 +9,7 @@ max_step_size: 0.1
 movement_cost: 0.0
 transport_cost: 5.0
 transportation_cost_norm: 2.0
+transport_cost_exponent: 2.0
 new_buyers_per_step: 20
 max_env_steps: 100
 space_resolution: 50

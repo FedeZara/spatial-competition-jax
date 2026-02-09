@@ -147,6 +147,7 @@ class SpatialCompetitionEnv:
         production_cost_factor: float = 0.5,
         movement_cost: float = 0.1,
         transportation_cost_norm: float = 2.0,
+        transport_cost_exponent: float = 1.0,
         topology: int = TOPOLOGY_RECTANGLE,
         information_level: int = INFO_COMPLETE,
         include_quality: bool = False,
@@ -174,6 +175,7 @@ class SpatialCompetitionEnv:
         self.production_cost_factor = production_cost_factor
         self.movement_cost = movement_cost
         self.transportation_cost_norm = transportation_cost_norm
+        self.transport_cost_exponent = transport_cost_exponent
         self.topology = topology
         self.information_level = information_level
         self.include_quality = include_quality
@@ -323,9 +325,11 @@ class SpatialCompetitionEnv:
         distances = self._compute_distances_pairwise(buyer_positions, seller_positions)
 
         # Utility matrix (B, S)
+        # Apply transport cost exponent (1 = linear, 2 = quadratic à la d'Aspremont)
+        transport_distances = distances ** self.transport_cost_exponent
         utility = (
             buyer_values[:, None]
-            - buyer_distance_factors[:, None] * distances
+            - buyer_distance_factors[:, None] * transport_distances
             + buyer_quality_tastes[:, None] * seller_qualities[None, :]
             - seller_prices[None, :]
         )

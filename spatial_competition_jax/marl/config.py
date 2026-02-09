@@ -23,6 +23,7 @@ class EnvConfig:
     movement_cost: float = 0.0
     transport_cost: float = 2.0
     transportation_cost_norm: float = 2.0
+    transport_cost_exponent: float = 1.0
     quality_taste: float = 0.0
     include_quality: bool = False
     new_buyers_per_step: int = 50

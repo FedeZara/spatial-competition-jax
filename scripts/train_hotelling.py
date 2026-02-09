@@ -117,6 +117,7 @@ def _train(
         movement_cost=config.env.movement_cost,
         transport_cost=config.env.transport_cost,
         transportation_cost_norm=config.env.transportation_cost_norm,
+        transport_cost_exponent=config.env.transport_cost_exponent,
         quality_taste=config.env.quality_taste,
         include_quality=config.env.include_quality,
         new_buyers_per_step=config.env.new_buyers_per_step,

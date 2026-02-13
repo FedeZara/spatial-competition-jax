@@ -1,0 +1,17 @@
+# PSRO configuration for 1D Hotelling (Linear City)
+# Inherits environment settings from hotelling_1d.yaml
+
+_parent: hotelling_1d.yaml
+
+# PSRO outer loop
+num_psro_iterations: 10
+num_br_updates: 3000
+num_eval_episodes: 50
+warmstart_br: true
+log_interval: 100
+save_interval: 1
+
+# Override training hypers for best-response oracle
+total_updates: 3000
+num_envs: 32
+rollout_length: 128

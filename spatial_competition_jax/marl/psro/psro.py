@@ -448,6 +448,7 @@ class PSROLoop:
                 self.payoff_table.matrix if self.payoff_table._size > 0 else None
             ),
             "exploitability_history": exploitability_history,
+            "config": self.config,
         }
 
         path.parent.mkdir(parents=True, exist_ok=True)

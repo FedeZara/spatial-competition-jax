@@ -108,12 +108,19 @@ def main() -> None:
         print(f"Payoff matrix shape: {np.asarray(payoff_matrix).shape}")
 
     # ── Config ────────────────────────────────────────────────────────
-    config_path = Path(__file__).parent.parent / args.config
-    if config_path.exists():
-        config = Config.from_yaml(config_path)
+    # Prefer config embedded in checkpoint (guarantees matching arch),
+    # fall back to CLI --config path.
+    if "config" in ckpt and ckpt["config"] is not None:
+        config = ckpt["config"]
+        print("Config loaded from checkpoint (architecture guaranteed to match)")
     else:
-        print(f"Config not found: {config_path}, using defaults")
-        config = Config()
+        config_path = Path(__file__).parent.parent / args.config
+        if config_path.exists():
+            config = Config.from_yaml(config_path)
+            print(f"Config loaded from {config_path}")
+        else:
+            print(f"Config not found: {config_path}, using defaults")
+            config = Config()
 
     egocentric = config.train.observation_mode == "egocentric"
 

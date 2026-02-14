@@ -1,15 +1,15 @@
 """Policy adapters that abstract distribution-specific logic.
 
 ``MAPPO`` calls only the methods defined by the :class:`PolicyAdapter`
-protocol.  Two concrete implementations are provided:
+protocol.  Four concrete implementations are provided:
 
-``ContinuousPolicy``
-    Wraps :class:`SharedActorCritic` (tanh-Gaussian movement + Beta
-    price).
+**Global observation** (one state vector, per-agent heads):
+- ``ContinuousPolicy``  – tanh-Gaussian movement + Beta price
+- ``DiscretePolicy``     – joint Categorical
 
-``DiscretePolicy``
-    Wraps :class:`DiscreteActorCritic` (joint Categorical over
-    location × price bins).
+**Egocentric observation** (per-agent obs, shared single-agent net):
+- ``EgoContinuousPolicy``  – same distributions, ego reshape
+- ``EgoDiscretePolicy``    – Categorical, ego reshape
 """
 
 from __future__ import annotations
@@ -22,7 +22,11 @@ import jax.numpy as jnp
 from spatial_competition_jax.marl.mappo.networks import (
     EPS,
     DiscreteActorCritic,
+    EgoActorCritic,
+    EgoDiscreteActorCritic,
     SharedActorCritic,
+    _categorical_entropy,
+    _categorical_log_prob,
     _entropy_beta,
     _entropy_gaussian,
     _log_prob_beta,
@@ -37,297 +41,282 @@ from spatial_competition_jax.marl.mappo.networks import (
 
 
 class PolicyAdapter(Protocol):
-    """Interface that every policy network must implement.
+    """Interface that every policy must implement.
 
-    All array shapes use the conventions:
-    - ``A`` = number of agents
-    - ``...`` = arbitrary leading batch dimensions
+    Shape conventions:
+    - ``E`` = environments,  ``A`` = agents
+    - Global mode:  states ``(E, state_dim)``, outputs ``(E, A, ...)``
+    - Ego mode:     states ``(E, A, obs_dim)``, outputs ``(E, A, ...)``
     """
 
     num_agents: int
+    per_agent_obs: bool  # True → (E, A, obs_dim); False → (E, state_dim)
 
-    def init(
-        self, key: jnp.ndarray, dummy_state: jnp.ndarray,
-    ) -> Any:
-        """Initialise network parameters."""
-        ...
+    def init(self, key: jnp.ndarray, dummy: jnp.ndarray) -> Any: ...
 
     def sample(
         self, params: Any, states: jnp.ndarray, key: jnp.ndarray,
     ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
-        """Sample stochastic actions.
-
-        Returns:
-            ``(actions, log_probs, values)``
-            - actions:   ``(..., A, action_dim)``
-            - log_probs: ``(..., A)``
-            - values:    ``(..., A)``
-        """
+        """Returns ``(actions, log_probs, values)`` — shapes ``(E, A, ...)``."""
         ...
 
     def evaluate(
         self, params: Any, states: jnp.ndarray, actions: jnp.ndarray,
     ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
-        """Evaluate log-prob and entropy for stored actions.
-
-        Returns:
-            ``(log_probs, entropy, values)``
-            - log_probs: ``(..., A)``
-            - entropy:   ``(..., A)``
-            - values:    ``(..., A)``
-        """
+        """Returns ``(log_probs, entropy, values)`` — shapes ``(E, A)``."""
         ...
 
     def deterministic(
         self, params: Any, states: jnp.ndarray,
     ) -> tuple[jnp.ndarray, jnp.ndarray]:
-        """Return deterministic (mode) actions.
-
-        Returns:
-            ``(actions, values)``
-            - actions: ``(..., A, action_dim)``
-            - values:  ``(..., A)``
-        """
+        """Returns ``(actions, values)``."""
         ...
 
-    def value(
-        self, params: Any, states: jnp.ndarray,
-    ) -> jnp.ndarray:
-        """Compute value estimates only.
-
-        Returns:
-            ``values``  shape ``(..., A)``
-        """
+    def value(self, params: Any, states: jnp.ndarray) -> jnp.ndarray:
+        """Returns ``values`` — shape ``(E, A)``."""
         ...
 
 
 # ---------------------------------------------------------------------------
-# Continuous (Gaussian + Beta)
+# Global: Continuous (Gaussian + Beta)
 # ---------------------------------------------------------------------------
 
 
 class ContinuousPolicy:
-    """Adapter for :class:`SharedActorCritic` (continuous actions).
+    """Global-state adapter for :class:`SharedActorCritic`."""
 
-    Movement dimensions use a tanh-squashed Gaussian; bounded
-    dimensions (price / quality) use a Beta distribution.
-    """
+    per_agent_obs = False
 
     def __init__(self, network: SharedActorCritic) -> None:
         self.network = network
         self.num_agents = network.num_agents
 
-    # -- init ---------------------------------------------------------------
-
-    def init(
-        self, key: jnp.ndarray, dummy_state: jnp.ndarray,
-    ) -> Any:
-        return self.network.init(key, dummy_state)
-
-    # -- sample -------------------------------------------------------------
+    def init(self, key: jnp.ndarray, dummy: jnp.ndarray) -> Any:
+        return self.network.init(key, dummy)
 
     def sample(
         self, params: Any, states: jnp.ndarray, key: jnp.ndarray,
     ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
-        gauss_means, gauss_log_stds, beta_alphas, beta_betas, values_symlog = (
-            self.network.apply(params, states)  # type: ignore[misc]
-        )
-        values = symexp(values_symlog)
-        gauss_stds = jnp.exp(gauss_log_stds)
-
-        k_gauss, k_beta = jax.random.split(key)
-
-        # Movement (tanh-squashed Gaussian)
-        raw = gauss_means + gauss_stds * jax.random.normal(
-            k_gauss, gauss_means.shape,
-        )
+        gm, gls, ba, bb, v_sym = self.network.apply(params, states)  # type: ignore[misc]
+        values = symexp(v_sym)
+        gs = jnp.exp(gls)
+        k_g, k_b = jax.random.split(key)
+        raw = gm + gs * jax.random.normal(k_g, gm.shape)
         movement = jnp.tanh(raw)
-        lp_move = _log_prob_tanh_normal(gauss_means, gauss_stds, raw, movement)
-
-        # Bounded (Beta)
-        bounded = jax.random.beta(k_beta, beta_alphas, beta_betas)
+        lp_m = _log_prob_tanh_normal(gm, gs, raw, movement)
+        bounded = jax.random.beta(k_b, ba, bb)
         bounded = jnp.clip(bounded, EPS, 1.0 - EPS)
-        lp_bounded = _log_prob_beta(beta_alphas, beta_betas, bounded)
-
-        actions = jnp.concatenate([movement, bounded], axis=-1)
-        log_probs = lp_move + lp_bounded
-
-        return actions, log_probs, values
-
-    # -- evaluate -----------------------------------------------------------
+        lp_b = _log_prob_beta(ba, bb, bounded)
+        return jnp.concatenate([movement, bounded], axis=-1), lp_m + lp_b, values
 
     def evaluate(
         self, params: Any, states: jnp.ndarray, actions: jnp.ndarray,
     ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
-        gauss_means, gauss_log_stds, beta_alphas, beta_betas, values = (
-            self.network.apply(params, states)  # type: ignore[misc]
-        )
-        gauss_stds = jnp.exp(gauss_log_stds)
-
-        move_dim = self.network.movement_dim
-        movement_actions = actions[..., :move_dim]
-        bounded_actions = actions[..., move_dim:]
-
-        # Movement log-prob (recover pre-tanh value)
-        clipped = jnp.clip(movement_actions, -1.0 + EPS, 1.0 - EPS)
-        raw = jnp.arctanh(clipped)
-        lp_move = _log_prob_tanh_normal(
-            gauss_means, gauss_stds, raw, movement_actions,
-        )
-
-        # Bounded log-prob
-        lp_bounded = _log_prob_beta(beta_alphas, beta_betas, bounded_actions)
-
-        log_probs = lp_move + lp_bounded
-        entropy = (
-            _entropy_gaussian(gauss_log_stds)
-            + _entropy_beta(beta_alphas, beta_betas)
-        )
-
-        return log_probs, entropy, values
-
-    # -- deterministic ------------------------------------------------------
+        gm, gls, ba, bb, values = self.network.apply(params, states)  # type: ignore[misc]
+        gs = jnp.exp(gls)
+        d = self.network.movement_dim
+        m_a, b_a = actions[..., :d], actions[..., d:]
+        raw = jnp.arctanh(jnp.clip(m_a, -1.0 + EPS, 1.0 - EPS))
+        lp_m = _log_prob_tanh_normal(gm, gs, raw, m_a)
+        lp_b = _log_prob_beta(ba, bb, b_a)
+        entropy = _entropy_gaussian(gls) + _entropy_beta(ba, bb)
+        return lp_m + lp_b, entropy, values
 
     def deterministic(
         self, params: Any, states: jnp.ndarray,
     ) -> tuple[jnp.ndarray, jnp.ndarray]:
-        gauss_means, _, beta_alphas, beta_betas, values_symlog = (
-            self.network.apply(params, states)  # type: ignore[misc]
-        )
-        values = symexp(values_symlog)
+        gm, _, ba, bb, v_sym = self.network.apply(params, states)  # type: ignore[misc]
+        movement = jnp.tanh(gm)
+        bounded = (ba - 1.0) / (ba + bb - 2.0)
+        return jnp.concatenate([movement, bounded], axis=-1), symexp(v_sym)
 
-        movement = jnp.tanh(gauss_means)
-        bounded = (beta_alphas - 1.0) / (beta_alphas + beta_betas - 2.0)
-        actions = jnp.concatenate([movement, bounded], axis=-1)
-
-        return actions, values
-
-    # -- value --------------------------------------------------------------
-
-    def value(
-        self, params: Any, states: jnp.ndarray,
-    ) -> jnp.ndarray:
-        _, _, _, _, values_symlog = self.network.apply(params, states)  # type: ignore[misc]
-        return symexp(values_symlog)
+    def value(self, params: Any, states: jnp.ndarray) -> jnp.ndarray:
+        _, _, _, _, v_sym = self.network.apply(params, states)  # type: ignore[misc]
+        return symexp(v_sym)
 
 
 # ---------------------------------------------------------------------------
-# Discrete (joint Categorical)
+# Global: Discrete (joint Categorical)
 # ---------------------------------------------------------------------------
 
 
 class DiscretePolicy:
-    """Adapter for :class:`DiscreteActorCritic` (discrete actions).
+    """Global-state adapter for :class:`DiscreteActorCritic`."""
 
-    Each agent samples a single action index from a Categorical
-    distribution over ``num_actions`` options.  The index is stored
-    as a float32 scalar (shape ``(..., A, 1)``) so that the existing
-    buffer / minibatch code works unchanged.
-    """
+    per_agent_obs = False
 
     def __init__(self, network: DiscreteActorCritic) -> None:
         self.network = network
         self.num_agents = network.num_agents
         self.num_actions = network.num_actions
 
-    # -- init ---------------------------------------------------------------
-
-    def init(
-        self, key: jnp.ndarray, dummy_state: jnp.ndarray,
-    ) -> Any:
-        return self.network.init(key, dummy_state)
-
-    # -- sample -------------------------------------------------------------
+    def init(self, key: jnp.ndarray, dummy: jnp.ndarray) -> Any:
+        return self.network.init(key, dummy)
 
     def sample(
         self, params: Any, states: jnp.ndarray, key: jnp.ndarray,
     ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
-        logits, values_symlog = self.network.apply(params, states)  # type: ignore[misc]
-        values = symexp(values_symlog)
-
-        # logits: (..., A, num_actions)
-        # Sample one index per agent
-        flat_logits = logits.reshape(-1, self.num_actions)
-        flat_indices = jax.random.categorical(key, flat_logits)  # (N,)
-        indices = flat_indices.reshape(logits.shape[:-1])  # (..., A)
-
-        # Log-prob of chosen actions
-        log_probs = _categorical_log_prob(logits, indices)
-
-        # Store as (..., A, 1) float32
-        actions = indices[..., None].astype(jnp.float32)
-
-        return actions, log_probs, values
-
-    # -- evaluate -----------------------------------------------------------
+        logits, v_sym = self.network.apply(params, states)  # type: ignore[misc]
+        values = symexp(v_sym)
+        flat = logits.reshape(-1, self.num_actions)
+        idx = jax.random.categorical(key, flat).reshape(logits.shape[:-1])
+        lp = _categorical_log_prob(logits, idx)
+        return idx[..., None].astype(jnp.float32), lp, values
 
     def evaluate(
         self, params: Any, states: jnp.ndarray, actions: jnp.ndarray,
     ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
         logits, values = self.network.apply(params, states)  # type: ignore[misc]
-
-        indices = actions[..., 0].astype(jnp.int32)  # (..., A)
-
-        log_probs = _categorical_log_prob(logits, indices)
-        entropy = _categorical_entropy(logits)
-
-        return log_probs, entropy, values
-
-    # -- deterministic ------------------------------------------------------
+        idx = actions[..., 0].astype(jnp.int32)
+        return _categorical_log_prob(logits, idx), _categorical_entropy(logits), values
 
     def deterministic(
         self, params: Any, states: jnp.ndarray,
     ) -> tuple[jnp.ndarray, jnp.ndarray]:
-        logits, values_symlog = self.network.apply(params, states)  # type: ignore[misc]
-        values = symexp(values_symlog)
+        logits, v_sym = self.network.apply(params, states)  # type: ignore[misc]
+        idx = jnp.argmax(logits, axis=-1)
+        return idx[..., None].astype(jnp.float32), symexp(v_sym)
 
-        indices = jnp.argmax(logits, axis=-1)  # (..., A)
-        actions = indices[..., None].astype(jnp.float32)
+    def value(self, params: Any, states: jnp.ndarray) -> jnp.ndarray:
+        _, v_sym = self.network.apply(params, states)  # type: ignore[misc]
+        return symexp(v_sym)
 
-        return actions, values
 
-    # -- value --------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Egocentric: Continuous (Gaussian + Beta)
+# ---------------------------------------------------------------------------
 
-    def value(
+
+class EgoContinuousPolicy:
+    """Egocentric adapter for :class:`EgoActorCritic`.
+
+    Accepts ``(E, A, obs_dim)`` states, flattens to ``(E*A, obs_dim)``
+    for the network forward pass, then reshapes outputs back to
+    ``(E, A, ...)``.
+    """
+
+    per_agent_obs = True
+
+    def __init__(self, network: EgoActorCritic, num_agents: int) -> None:
+        self.network = network
+        self.num_agents = num_agents
+
+    def init(self, key: jnp.ndarray, dummy: jnp.ndarray) -> Any:
+        return self.network.init(key, dummy)
+
+    def _forward(self, params: Any, states: jnp.ndarray) -> tuple:
+        """Forward pass with automatic reshape.
+
+        Accepts ``(E, A, obs_dim)`` during rollout collection or
+        ``(B, obs_dim)`` during PPO updates (already flat from minibatching).
+        """
+        if states.ndim == 3:
+            E, A = states.shape[0], states.shape[1]
+            flat = states.reshape(E * A, -1)
+            gm, gls, ba, bb, v_sym = self.network.apply(params, flat)  # type: ignore[misc]
+            return (
+                gm.reshape(E, A, -1), gls.reshape(E, A, -1),
+                ba.reshape(E, A, -1), bb.reshape(E, A, -1),
+                v_sym.reshape(E, A),
+            )
+        # Already flat (B, obs_dim) — apply directly
+        return self.network.apply(params, states)  # type: ignore[misc]
+
+    def sample(
+        self, params: Any, states: jnp.ndarray, key: jnp.ndarray,
+    ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+        gm, gls, ba, bb, v_sym = self._forward(params, states)
+        values = symexp(v_sym)
+        gs = jnp.exp(gls)
+        k_g, k_b = jax.random.split(key)
+        raw = gm + gs * jax.random.normal(k_g, gm.shape)
+        movement = jnp.tanh(raw)
+        lp_m = _log_prob_tanh_normal(gm, gs, raw, movement)
+        bounded = jax.random.beta(k_b, ba, bb)
+        bounded = jnp.clip(bounded, EPS, 1.0 - EPS)
+        lp_b = _log_prob_beta(ba, bb, bounded)
+        return jnp.concatenate([movement, bounded], axis=-1), lp_m + lp_b, values
+
+    def evaluate(
+        self, params: Any, states: jnp.ndarray, actions: jnp.ndarray,
+    ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+        gm, gls, ba, bb, values = self._forward(params, states)
+        gs = jnp.exp(gls)
+        d = self.network.movement_dim
+        m_a, b_a = actions[..., :d], actions[..., d:]
+        raw = jnp.arctanh(jnp.clip(m_a, -1.0 + EPS, 1.0 - EPS))
+        lp_m = _log_prob_tanh_normal(gm, gs, raw, m_a)
+        lp_b = _log_prob_beta(ba, bb, b_a)
+        entropy = _entropy_gaussian(gls) + _entropy_beta(ba, bb)
+        return lp_m + lp_b, entropy, values
+
+    def deterministic(
         self, params: Any, states: jnp.ndarray,
-    ) -> jnp.ndarray:
-        _, values_symlog = self.network.apply(params, states)  # type: ignore[misc]
-        return symexp(values_symlog)
+    ) -> tuple[jnp.ndarray, jnp.ndarray]:
+        gm, _, ba, bb, v_sym = self._forward(params, states)
+        movement = jnp.tanh(gm)
+        bounded = (ba - 1.0) / (ba + bb - 2.0)
+        return jnp.concatenate([movement, bounded], axis=-1), symexp(v_sym)
+
+    def value(self, params: Any, states: jnp.ndarray) -> jnp.ndarray:
+        _, _, _, _, v_sym = self._forward(params, states)
+        return symexp(v_sym)
 
 
 # ---------------------------------------------------------------------------
-# Categorical helpers
+# Egocentric: Discrete (joint Categorical)
 # ---------------------------------------------------------------------------
 
 
-def _categorical_log_prob(
-    logits: jnp.ndarray,
-    indices: jnp.ndarray,
-) -> jnp.ndarray:
-    """Log-probability of chosen indices under a Categorical.
+class EgoDiscretePolicy:
+    """Egocentric adapter for :class:`EgoDiscreteActorCritic`.
 
-    Args:
-        logits: ``(..., A, num_actions)``
-        indices: ``(..., A)`` integer action indices.
-
-    Returns:
-        ``(..., A)``
+    Accepts ``(E, A, obs_dim)`` states, flattens/reshapes internally.
     """
-    log_probs_all = jax.nn.log_softmax(logits, axis=-1)  # (..., A, N)
-    return jnp.take_along_axis(
-        log_probs_all, indices[..., None], axis=-1,
-    ).squeeze(-1)
 
+    per_agent_obs = True
 
-def _categorical_entropy(logits: jnp.ndarray) -> jnp.ndarray:
-    """Entropy of a Categorical distribution.
+    def __init__(self, network: EgoDiscreteActorCritic, num_agents: int) -> None:
+        self.network = network
+        self.num_agents = num_agents
+        self.num_actions = network.num_actions
 
-    Args:
-        logits: ``(..., A, num_actions)``
+    def init(self, key: jnp.ndarray, dummy: jnp.ndarray) -> Any:
+        return self.network.init(key, dummy)
 
-    Returns:
-        ``(..., A)``
-    """
-    log_probs = jax.nn.log_softmax(logits, axis=-1)
-    probs = jax.nn.softmax(logits, axis=-1)
-    return -(probs * log_probs).sum(axis=-1)
+    def _forward(self, params: Any, states: jnp.ndarray) -> tuple:
+        if states.ndim == 3:
+            E, A = states.shape[0], states.shape[1]
+            flat = states.reshape(E * A, -1)
+            logits, v_sym = self.network.apply(params, flat)  # type: ignore[misc]
+            return logits.reshape(E, A, -1), v_sym.reshape(E, A)
+        return self.network.apply(params, states)  # type: ignore[misc]
+
+    def sample(
+        self, params: Any, states: jnp.ndarray, key: jnp.ndarray,
+    ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+        logits, v_sym = self._forward(params, states)
+        values = symexp(v_sym)
+        E, A, N = logits.shape
+        flat = logits.reshape(E * A, N)
+        idx = jax.random.categorical(key, flat).reshape(E, A)
+        lp = _categorical_log_prob(logits, idx)
+        return idx[..., None].astype(jnp.float32), lp, values
+
+    def evaluate(
+        self, params: Any, states: jnp.ndarray, actions: jnp.ndarray,
+    ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+        logits, values = self._forward(params, states)
+        idx = actions[..., 0].astype(jnp.int32)
+        return _categorical_log_prob(logits, idx), _categorical_entropy(logits), values
+
+    def deterministic(
+        self, params: Any, states: jnp.ndarray,
+    ) -> tuple[jnp.ndarray, jnp.ndarray]:
+        logits, v_sym = self._forward(params, states)
+        idx = jnp.argmax(logits, axis=-1)
+        return idx[..., None].astype(jnp.float32), symexp(v_sym)
+
+    def value(self, params: Any, states: jnp.ndarray) -> jnp.ndarray:
+        _, v_sym = self._forward(params, states)
+        return symexp(v_sym)

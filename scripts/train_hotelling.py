@@ -10,15 +10,19 @@ from pathlib import Path
 import jax
 
 from spatial_competition_jax.marl.config import Config
-from spatial_competition_jax.marl.mappo.evaluation import evaluate_policy
+from spatial_competition_jax.marl.mappo.evaluation import evaluate_ego_policy, evaluate_policy
 from spatial_competition_jax.marl.mappo.mappo import MAPPO, linear_anneal
 from spatial_competition_jax.marl.mappo.networks import (
     DiscreteActorCritic,
+    EgoActorCritic,
+    EgoDiscreteActorCritic,
     SharedActorCritic,
 )
 from spatial_competition_jax.marl.mappo.policy import (
     ContinuousPolicy,
     DiscretePolicy,
+    EgoContinuousPolicy,
+    EgoDiscretePolicy,
     PolicyAdapter,
 )
 from spatial_competition_jax.marl.training_wrapper import TrainingWrapper
@@ -55,24 +59,26 @@ def parse_args() -> argparse.Namespace:
 
 
 def build_policy(config: Config, wrapper: TrainingWrapper) -> PolicyAdapter:
-    """Build the appropriate PolicyAdapter from config."""
+    """Build the appropriate PolicyAdapter from config.
+
+    Handles all 4 combos: {global, egocentric} × {continuous, discrete}.
+    """
     hidden_dims = tuple(config.train.hidden_dims)
+    ego = config.train.observation_mode == "egocentric"
+    discrete = config.env.action_type == "discrete"
 
-    if config.env.action_type == "discrete":
-        discrete_net = DiscreteActorCritic(
-            num_actions=wrapper.num_actions,
-            num_agents=wrapper.num_agents,
-            hidden_dims=hidden_dims,
-        )
-        return DiscretePolicy(discrete_net)
+    if ego and discrete:
+        net = EgoDiscreteActorCritic(num_actions=wrapper.num_actions, hidden_dims=hidden_dims)
+        return EgoDiscretePolicy(net, num_agents=wrapper.num_agents)
+    if ego:
+        net = EgoActorCritic(movement_dim=wrapper.movement_dim, bounded_dim=wrapper.bounded_dim, hidden_dims=hidden_dims)
+        return EgoContinuousPolicy(net, num_agents=wrapper.num_agents)
+    if discrete:
+        net = DiscreteActorCritic(num_actions=wrapper.num_actions, num_agents=wrapper.num_agents, hidden_dims=hidden_dims)
+        return DiscretePolicy(net)
 
-    continuous_net = SharedActorCritic(
-        movement_dim=wrapper.movement_dim,
-        bounded_dim=wrapper.bounded_dim,
-        num_agents=wrapper.num_agents,
-        hidden_dims=hidden_dims,
-    )
-    return ContinuousPolicy(continuous_net)
+    net = SharedActorCritic(movement_dim=wrapper.movement_dim, bounded_dim=wrapper.bounded_dim, num_agents=wrapper.num_agents, hidden_dims=hidden_dims)
+    return ContinuousPolicy(net)
 
 
 def main() -> None:
@@ -162,9 +168,11 @@ def _train(
     )
 
     # ── policy adapter ────────────────────────────────────────────────
+    use_ego = config.train.observation_mode == "egocentric"
     policy = build_policy(config, wrapper)
 
-    print(f"State dim:   {wrapper.state_dim}")
+    print(f"Obs mode:    {'egocentric' if use_ego else 'global (per-agent heads)'}")
+    print(f"Obs dim:     {wrapper.obs_dim}")
     if config.env.action_type == "discrete":
         print(f"Num actions: {wrapper.num_actions} "
               f"({config.env.num_location_bins} loc × {config.env.num_price_bins} price)")
@@ -187,6 +195,7 @@ def _train(
         max_grad_norm=config.train.max_grad_norm,
         ppo_epochs=config.train.ppo_epochs,
         num_minibatches=config.train.num_minibatches,
+        target_kl=config.train.target_kl,
         seed=config.train.seed,
     )
 
@@ -294,14 +303,25 @@ def _train(
 
             # Evaluation
             if update % config.train.eval_interval == 0:
-                eval_stats = evaluate_policy(
-                    policy=policy,
-                    params=agent.params,
-                    wrapper=wrapper,
-                    num_episodes=config.train.eval_episodes,
-                    deterministic=config.train.deterministic_eval,
-                    temperature=config.train.buyer_choice_temp_end if use_temp_anneal else None,
-                )
+                if use_ego:
+                    eval_stats = evaluate_ego_policy(
+                        network=agent.network,
+                        params=agent.params,
+                        wrapper=wrapper,
+                        num_episodes=config.train.eval_episodes,
+                        deterministic=config.train.deterministic_eval,
+                        temperature=config.train.buyer_choice_temp_end if use_temp_anneal else None,
+                        is_discrete=config.env.action_type == "discrete",
+                    )
+                else:
+                    eval_stats = evaluate_policy(
+                        policy=policy,
+                        params=agent.params,
+                        wrapper=wrapper,
+                        num_episodes=config.train.eval_episodes,
+                        deterministic=config.train.deterministic_eval,
+                        temperature=config.train.buyer_choice_temp_end if use_temp_anneal else None,
+                    )
                 logger.log_metrics(eval_stats, prefix="eval")
 
                 eval_log: dict[str, float] = {
@@ -346,14 +366,25 @@ def _train(
 
     # ── final evaluation ───────────────────────────────────────────────
     print("Final evaluation …")
-    final_eval = evaluate_policy(
-        policy=policy,
-        params=agent.params,
-        wrapper=wrapper,
-        num_episodes=20,
-        deterministic=True,
-        temperature=config.train.buyer_choice_temp_end if use_temp_anneal else None,
-    )
+    if use_ego:
+        final_eval = evaluate_ego_policy(
+            network=agent.network,
+            params=agent.params,
+            wrapper=wrapper,
+            num_episodes=20,
+            deterministic=True,
+            temperature=config.train.buyer_choice_temp_end if use_temp_anneal else None,
+            is_discrete=config.env.action_type == "discrete",
+        )
+    else:
+        final_eval = evaluate_policy(
+            policy=policy,
+            params=agent.params,
+            wrapper=wrapper,
+            num_episodes=20,
+            deterministic=True,
+            temperature=config.train.buyer_choice_temp_end if use_temp_anneal else None,
+        )
     print(f"  Reward:   {final_eval['eval_reward_mean']:.2f} ± {final_eval['eval_reward_std']:.2f}")
     print(f"  Position: {final_eval['eval_position_mean']:.3f}")
     print(f"  Price:    {final_eval['eval_price_mean']:.2f}")

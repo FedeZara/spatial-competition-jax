@@ -350,6 +350,179 @@ def deterministic_actions(
 
 
 # ---------------------------------------------------------------------------
+# Egocentric Actor-Critic (single-agent, shared across agents)
+# ---------------------------------------------------------------------------
+
+
+class EgoActorCritic(nn.Module):
+    """Actor-Critic for per-agent egocentric observations.
+
+    Takes a single agent's observation and produces that agent's
+    action distribution parameters and value estimate.  The same
+    network is applied to every agent (weight sharing → symmetric
+    strategies).
+
+    Movement dimensions use a tanh-squashed Gaussian; bounded
+    dimensions (price and optionally quality) use a Beta distribution.
+    """
+
+    movement_dim: int
+    bounded_dim: int
+    hidden_dims: Sequence[int] = (256, 256)
+    dtype: Dtype = jnp.bfloat16
+    param_dtype: Dtype = jnp.float32
+    log_std_min: float = -5.0
+    log_std_max: float = 2.0
+
+    @property
+    def action_dim(self) -> int:
+        return self.movement_dim + self.bounded_dim
+
+    @nn.compact
+    def __call__(
+        self, obs: jnp.ndarray,
+    ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+        """Forward pass.
+
+        Args:
+            obs: ``(..., obs_dim)`` — a single agent's observation.
+
+        Returns:
+            ``(gauss_means, gauss_log_stds, beta_alphas, beta_betas, values)``
+            always float32, with shapes:
+            - gauss_means:    ``(..., movement_dim)``
+            - gauss_log_stds: ``(..., movement_dim)``
+            - beta_alphas:    ``(..., bounded_dim)``
+            - beta_betas:     ``(..., bounded_dim)``
+            - values:         ``(...,)``
+        """
+        x = obs.astype(self.dtype)
+
+        # Shared backbone
+        for i, dim in enumerate(self.hidden_dims):
+            x = nn.Dense(
+                dim,
+                dtype=self.dtype,
+                param_dtype=self.param_dtype,
+                kernel_init=orthogonal(jnp.sqrt(2)),
+                name=f"backbone_{i}",
+            )(x)
+            x = nn.relu(x)
+
+        features = x
+
+        # --- Gaussian head (movement) ---
+        gauss_mean = nn.Dense(
+            self.movement_dim,
+            dtype=self.dtype,
+            param_dtype=self.param_dtype,
+            kernel_init=orthogonal(0.01),
+            name="gauss_mean",
+        )(features)
+        gauss_log_std = nn.Dense(
+            self.movement_dim,
+            dtype=self.dtype,
+            param_dtype=self.param_dtype,
+            kernel_init=orthogonal(0.01),
+            name="gauss_log_std",
+        )(features)
+        gauss_log_std = jnp.clip(gauss_log_std, self.log_std_min, self.log_std_max)
+
+        # --- Beta head (price, and optionally quality) ---
+        beta_alpha_raw = nn.Dense(
+            self.bounded_dim,
+            dtype=self.dtype,
+            param_dtype=self.param_dtype,
+            kernel_init=orthogonal(0.01),
+            name="beta_alpha",
+        )(features)
+        beta_beta_raw = nn.Dense(
+            self.bounded_dim,
+            dtype=self.dtype,
+            param_dtype=self.param_dtype,
+            kernel_init=orthogonal(0.01),
+            name="beta_beta",
+        )(features)
+        beta_alpha_raw = jnp.clip(beta_alpha_raw, -20.0, 20.0)
+        beta_beta_raw = jnp.clip(beta_beta_raw, -20.0, 20.0)
+        beta_alpha = nn.softplus(beta_alpha_raw) + 1.0
+        beta_beta = nn.softplus(beta_beta_raw) + 1.0
+
+        # --- Critic head (scalar value) ---
+        value = nn.Dense(
+            1,
+            dtype=self.dtype,
+            param_dtype=self.param_dtype,
+            kernel_init=orthogonal(1.0),
+            name="critic",
+        )(features).squeeze(-1)
+
+        return (
+            gauss_mean.astype(jnp.float32),
+            gauss_log_std.astype(jnp.float32),
+            beta_alpha.astype(jnp.float32),
+            beta_beta.astype(jnp.float32),
+            value.astype(jnp.float32),
+        )
+
+
+def ego_sample_actions(
+    network: EgoActorCritic,
+    params: dict,
+    obs: jnp.ndarray,
+    key: jnp.ndarray,
+) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+    """Sample stochastic actions for per-agent egocentric observations.
+
+    Args:
+        network: ``EgoActorCritic`` module.
+        params: Network parameters.
+        obs: ``(..., obs_dim)`` — per-agent observations.
+        key: PRNG key.
+
+    Returns:
+        ``(actions, log_probs, values)`` with shapes
+        ``(..., action_dim)``, ``(...,)``, ``(...,)``.
+    """
+    gauss_means, gauss_log_stds, beta_alphas, beta_betas, values = network.apply(params, obs)  # type: ignore[misc]
+    gauss_stds = jnp.exp(gauss_log_stds)
+
+    k_gauss, k_beta = jax.random.split(key)
+
+    raw_movement = gauss_means + gauss_stds * jax.random.normal(k_gauss, gauss_means.shape)
+    movement_actions = jnp.tanh(raw_movement)
+    log_prob_movement = _log_prob_tanh_normal(gauss_means, gauss_stds, raw_movement, movement_actions)
+
+    bounded_actions = jax.random.beta(k_beta, beta_alphas, beta_betas)
+    bounded_actions = jnp.clip(bounded_actions, EPS, 1.0 - EPS)
+    log_prob_bounded = _log_prob_beta(beta_alphas, beta_betas, bounded_actions)
+
+    actions = jnp.concatenate([movement_actions, bounded_actions], axis=-1)
+    log_probs = log_prob_movement + log_prob_bounded
+
+    return actions, log_probs, values
+
+
+def ego_deterministic_actions(
+    network: EgoActorCritic,
+    params: dict,
+    obs: jnp.ndarray,
+) -> tuple[jnp.ndarray, jnp.ndarray]:
+    """Return deterministic actions for per-agent egocentric observations.
+
+    Returns:
+        ``(actions, values)`` with shapes ``(..., action_dim)``, ``(...,)``.
+    """
+    gauss_means, _, beta_alphas, beta_betas, values = network.apply(params, obs)  # type: ignore[misc]
+
+    movement_actions = jnp.tanh(gauss_means)
+    bounded_actions = (beta_alphas - 1.0) / (beta_alphas + beta_betas - 2.0)
+
+    actions = jnp.concatenate([movement_actions, bounded_actions], axis=-1)
+    return actions, values
+
+
+# ---------------------------------------------------------------------------
 # Discrete Actor-Critic (joint Categorical)
 # ---------------------------------------------------------------------------
 
@@ -434,3 +607,139 @@ class DiscreteActorCritic(nn.Module):
             logits.astype(jnp.float32),
             values.astype(jnp.float32),
         )
+
+
+# ---------------------------------------------------------------------------
+# Egocentric Discrete Actor-Critic (single-agent Categorical)
+# ---------------------------------------------------------------------------
+
+
+class EgoDiscreteActorCritic(nn.Module):
+    """Egocentric Actor-Critic with a joint Categorical over discrete actions.
+
+    Takes a single agent's egocentric observation and produces logits
+    over ``num_actions`` options plus a scalar value.  The same network
+    is applied to every agent (weight sharing → symmetric strategies).
+
+    ``__call__`` returns ``(logits, value)`` both in float32.
+    """
+
+    num_actions: int
+    hidden_dims: Sequence[int] = (256, 256)
+    dtype: Dtype = jnp.bfloat16
+    param_dtype: Dtype = jnp.float32
+
+    @nn.compact
+    def __call__(
+        self, obs: jnp.ndarray,
+    ) -> tuple[jnp.ndarray, jnp.ndarray]:
+        """Forward pass.
+
+        Args:
+            obs: ``(..., obs_dim)`` — a single agent's observation.
+
+        Returns:
+            ``(logits, value)`` with shapes:
+            - logits: ``(..., num_actions)``
+            - value:  ``(...,)``
+        """
+        x = obs.astype(self.dtype)
+
+        for i, dim in enumerate(self.hidden_dims):
+            x = nn.Dense(
+                dim,
+                dtype=self.dtype,
+                param_dtype=self.param_dtype,
+                kernel_init=orthogonal(jnp.sqrt(2)),
+                name=f"backbone_{i}",
+            )(x)
+            x = nn.relu(x)
+
+        features = x
+
+        logits = nn.Dense(
+            self.num_actions,
+            dtype=self.dtype,
+            param_dtype=self.param_dtype,
+            kernel_init=orthogonal(0.01),
+            name="logits",
+        )(features)
+
+        value = nn.Dense(
+            1,
+            dtype=self.dtype,
+            param_dtype=self.param_dtype,
+            kernel_init=orthogonal(1.0),
+            name="critic",
+        )(features).squeeze(-1)
+
+        return (
+            logits.astype(jnp.float32),
+            value.astype(jnp.float32),
+        )
+
+
+def _categorical_log_prob(
+    logits: jnp.ndarray,
+    indices: jnp.ndarray,
+) -> jnp.ndarray:
+    """Log-prob of chosen indices under a Categorical. ``(...,)``."""
+    log_probs_all = jax.nn.log_softmax(logits, axis=-1)
+    return jnp.take_along_axis(
+        log_probs_all, indices[..., None], axis=-1,
+    ).squeeze(-1)
+
+
+def _categorical_entropy(logits: jnp.ndarray) -> jnp.ndarray:
+    """Entropy of a Categorical. ``(...,)``."""
+    log_probs = jax.nn.log_softmax(logits, axis=-1)
+    probs = jax.nn.softmax(logits, axis=-1)
+    return -(probs * log_probs).sum(axis=-1)
+
+
+def ego_discrete_sample(
+    network: EgoDiscreteActorCritic,
+    params: dict,
+    obs: jnp.ndarray,
+    key: jnp.ndarray,
+) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+    """Sample discrete actions for per-agent egocentric observations.
+
+    Args:
+        obs: ``(..., obs_dim)``
+
+    Returns:
+        ``(actions, log_probs, values)`` with shapes
+        ``(..., 1)``, ``(...,)``, ``(...,)``.
+        Actions are float32 bin indices.
+    """
+    logits, values_symlog = network.apply(params, obs)  # type: ignore[misc]
+    values = symexp(values_symlog)
+
+    flat_logits = logits.reshape(-1, network.num_actions)
+    flat_indices = jax.random.categorical(key, flat_logits)
+    indices = flat_indices.reshape(logits.shape[:-1])
+
+    log_probs = _categorical_log_prob(logits, indices)
+    actions = indices[..., None].astype(jnp.float32)
+
+    return actions, log_probs, values
+
+
+def ego_discrete_deterministic(
+    network: EgoDiscreteActorCritic,
+    params: dict,
+    obs: jnp.ndarray,
+) -> tuple[jnp.ndarray, jnp.ndarray]:
+    """Deterministic discrete actions (argmax).
+
+    Returns:
+        ``(actions, values)`` with shapes ``(..., 1)``, ``(...,)``.
+    """
+    logits, values_symlog = network.apply(params, obs)  # type: ignore[misc]
+    values = symexp(values_symlog)
+
+    indices = jnp.argmax(logits, axis=-1)
+    actions = indices[..., None].astype(jnp.float32)
+
+    return actions, values

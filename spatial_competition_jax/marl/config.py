@@ -55,6 +55,10 @@ class TrainConfig:
     clip_epsilon: float = 0.2
     value_coef: float = 0.5
     entropy_coef: float = 0.01
+    target_kl: float | None = None  # KL-based early stopping (None = disabled)
+
+    # Observation mode: "global" (old per-agent heads) or "egocentric"
+    observation_mode: str = "global"
 
     # Optimization
     learning_rate: float = 3e-4

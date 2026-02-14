@@ -8,6 +8,14 @@ from typing import TYPE_CHECKING, Any
 import jax
 import jax.numpy as jnp
 
+from spatial_competition_jax.marl.mappo.networks import (
+    EgoActorCritic,
+    EgoDiscreteActorCritic,
+    ego_deterministic_actions,
+    ego_discrete_deterministic,
+    ego_discrete_sample,
+    ego_sample_actions,
+)
 from spatial_competition_jax.marl.training_wrapper import TrainingWrapper
 
 if TYPE_CHECKING:
@@ -156,6 +164,115 @@ def evaluate_policy(
 
     if wrapper.num_agents == 2:
         # all_positions: (E, 2, D) → distance between agent 0 and 1
+        distances = jnp.abs(all_positions[:, 0, 0] - all_positions[:, 1, 0])
+        results["eval_seller_distance"] = float(distances.mean())
+
+    return results
+
+
+# ---------------------------------------------------------------------------
+# Egocentric evaluation
+# ---------------------------------------------------------------------------
+
+
+@functools.partial(jax.jit, static_argnums=(0, 1, 4, 5, 6))
+def _eval_ego_episodes_jit(
+    network: EgoActorCritic | EgoDiscreteActorCritic,
+    wrapper: TrainingWrapper,
+    params: Any,
+    keys: jnp.ndarray,
+    deterministic: bool,
+    use_temp: bool,
+    is_discrete: bool,
+    temperature: jnp.ndarray,
+) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+    """Egocentric evaluation: run episodes with per-agent observations."""
+    max_steps = wrapper.env.max_env_steps
+
+    def run_one(key: jnp.ndarray) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+        reset_key, step_key = jax.random.split(key)
+        obs_all, env_state = wrapper.reset_ego(reset_key)
+
+        def scan_fn(
+            carry: tuple[Any, jnp.ndarray, jnp.ndarray],
+            _: None,
+        ) -> tuple[tuple[Any, jnp.ndarray, jnp.ndarray], jnp.ndarray]:
+            env_state, obs_all, sk = carry
+            sk, action_key = jax.random.split(sk)
+
+            if is_discrete:
+                if deterministic:
+                    actions, _ = ego_discrete_deterministic(network, params, obs_all)  # type: ignore[arg-type]
+                else:
+                    actions, _, _ = ego_discrete_sample(network, params, obs_all, action_key)  # type: ignore[arg-type]
+            else:
+                if deterministic:
+                    actions, _ = ego_deterministic_actions(network, params, obs_all)  # type: ignore[arg-type]
+                else:
+                    actions, _, _ = ego_sample_actions(network, params, obs_all, action_key)  # type: ignore[arg-type]
+
+            if use_temp:
+                next_obs, next_es, rewards, _dones = wrapper.step_ego(
+                    sk, env_state, actions, temperature=temperature,
+                )
+            else:
+                next_obs, next_es, rewards, _dones = wrapper.step_ego(
+                    sk, env_state, actions,
+                )
+
+            return (next_es, next_obs, sk), rewards
+
+        (final_env_state, _, _), all_rewards = jax.lax.scan(
+            scan_fn,
+            (env_state, obs_all, step_key),
+            None,
+            length=max_steps,
+        )
+
+        total_reward = all_rewards.sum(axis=0)
+        positions = (
+            final_env_state.seller_positions.astype(jnp.float32)
+            / wrapper.space_resolution
+        )
+        prices = final_env_state.seller_prices
+        return total_reward, positions, prices
+
+    return jax.vmap(run_one)(keys)
+
+
+def evaluate_ego_policy(
+    network: EgoActorCritic | EgoDiscreteActorCritic,
+    params: dict,
+    wrapper: TrainingWrapper,
+    num_episodes: int = 10,
+    deterministic: bool = True,
+    key: jnp.ndarray | None = None,
+    temperature: float | None = None,
+    is_discrete: bool = False,
+) -> dict[str, float]:
+    """Evaluate a trained egocentric policy (continuous or discrete)."""
+    if key is None:
+        key = jax.random.PRNGKey(0)
+
+    use_temp = wrapper.env.buyer_choice_temperature is not None
+    temp_arr = jnp.float32(temperature if temperature is not None else 0.0)
+    keys = jax.random.split(key, num_episodes)
+
+    total_rewards, all_positions, all_prices = _eval_ego_episodes_jit(
+        network, wrapper, params, keys, deterministic, use_temp, is_discrete, temp_arr,
+    )
+
+    episode_rewards = total_rewards.sum(axis=-1)
+
+    results: dict[str, float] = {
+        "eval_reward_mean": float(episode_rewards.mean()),
+        "eval_reward_std": float(episode_rewards.std()),
+        "eval_length_mean": float(wrapper.env.max_env_steps),
+        "eval_position_mean": float(all_positions[..., 0].mean()),
+        "eval_price_mean": float(all_prices.mean()),
+    }
+
+    if wrapper.num_agents == 2:
         distances = jnp.abs(all_positions[:, 0, 0] - all_positions[:, 1, 0])
         results["eval_seller_distance"] = float(distances.mean())
 

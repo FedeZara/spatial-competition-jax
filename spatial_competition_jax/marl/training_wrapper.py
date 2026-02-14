@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 
 from spatial_competition_jax.env import (
     EnvState,
@@ -154,6 +155,13 @@ class TrainingWrapper:
             self.bounded_dim += 1  # Beta: + quality
         self.action_dim = self.movement_dim + self.bounded_dim
 
+        # Precompute ego-centric reordering indices.
+        # _ego_indices[i] = [i, (i+1)%A, (i+2)%A, …]
+        # So agent i always sees its own features first.
+        self._ego_indices = jnp.array(
+            np.stack([np.roll(np.arange(num_sellers), -i) for i in range(num_sellers)])
+        )  # (A, A)
+
     # ------------------------------------------------------------------
     # Observation / action helpers
     # ------------------------------------------------------------------
@@ -216,6 +224,66 @@ class TrainingWrapper:
         channels.append(per_agent.ravel())
         return jnp.concatenate(channels)
 
+    def extract_all_agent_obs(self, state: EnvState) -> jnp.ndarray:
+        """Build egocentric observations for all agents.
+
+        Each agent's observation has the same dimension but with its
+        own features placed first in the per-agent section.
+
+        Layout (per agent)::
+
+            [ blob_channels,
+              my_pos/R, my_price/max, (my_quality/max,)
+              other0_pos/R, other0_price/max, (other0_quality/max,)
+              … ]
+
+        Returns:
+            Array of shape ``(A, obs_dim)``.
+        """
+        positions = state.seller_positions.astype(jnp.float32) / self.space_resolution
+        norm_prices = state.seller_prices / self.max_price
+
+        # --- Gaussian blob spatial channels (sellers only) ---
+        ones = jnp.ones(self.num_agents)
+        presence = _gaussian_blob_channel(
+            positions, ones, self.space_resolution, self.blob_sigma, self.dimensions,
+        )
+        price_weighted = _gaussian_blob_channel(
+            positions, norm_prices, self.space_resolution, self.blob_sigma, self.dimensions,
+        )
+        avg_price = price_weighted / (presence + 1e-8)
+
+        channels = [presence.ravel(), avg_price.ravel()]
+
+        if self.include_quality:
+            norm_qualities = state.seller_qualities / self.max_quality
+            quality_weighted = _gaussian_blob_channel(
+                positions, norm_qualities, self.space_resolution, self.blob_sigma, self.dimensions,
+            )
+            avg_quality = quality_weighted / (presence + 1e-8)
+            channels.append(avg_quality.ravel())
+
+        blob_vec = jnp.concatenate(channels)  # (blob_dim,)
+
+        # --- Per-agent scalar features ---
+        prices_col = norm_prices[:, None]
+        if self.include_quality:
+            qualities_col = norm_qualities[:, None]  # type: ignore[possibly-undefined]
+            per_agent = jnp.concatenate([positions, prices_col, qualities_col], axis=-1)
+        else:
+            per_agent = jnp.concatenate([positions, prices_col], axis=-1)
+        # per_agent: (A, per_agent_dim)
+
+        # --- Ego-centric reordering ---
+        # _ego_indices: (A, A) — each row reorders agents so "self" is first
+        ego_per_agent = per_agent[self._ego_indices]  # (A, A, per_agent_dim)
+        ego_flat = ego_per_agent.reshape(self.num_agents, -1)  # (A, A*per_agent_dim)
+
+        # Broadcast blob channels to all agents (shared)
+        blob_broadcast = jnp.broadcast_to(blob_vec, (self.num_agents, blob_vec.shape[0]))
+
+        return jnp.concatenate([blob_broadcast, ego_flat], axis=-1)  # (A, obs_dim)
+
     def map_actions(self, actions: jnp.ndarray) -> dict[str, jnp.ndarray]:
         """Map continuous network actions to the env action dict.
 
@@ -253,8 +321,12 @@ class TrainingWrapper:
         Decodes into ``(loc_bin, price_bin)`` and converts to
         absolute position / price.
 
+        Location bin *i* maps directly to grid position *i* (no
+        rounding to bin centre).  With ``num_location_bins == space_resolution``
+        this gives exact 1-to-1 coverage.
+
         Movement is computed as the delta from the current position to
-        the target bin centre.
+        the target grid position.
 
         Args:
             actions: ``(num_agents, 1)`` float32 bin indices.
@@ -267,13 +339,12 @@ class TrainingWrapper:
         loc_bin = idx // self.num_price_bins
         price_bin = idx % self.num_price_bins
 
-        # Target position: evenly spaced bins in [0, space_resolution)
-        # bin_centre maps bin i to the centre of the i-th segment
+        # Target position: bin i maps to grid position i * (res / n_loc)
         n_loc = self.num_location_bins
         target_pos = (
-            (loc_bin.astype(jnp.float32) + 0.5)
-            / n_loc
-            * self.space_resolution
+            loc_bin.astype(jnp.float32)
+            / jnp.maximum(n_loc - 1, 1)
+            * (self.space_resolution - 1)
         ).astype(jnp.int32)
         target_pos = jnp.clip(target_pos, 0, self.space_resolution - 1)
 
@@ -414,3 +485,110 @@ class TrainingWrapper:
         final_global_state = jnp.where(done, reset_global_state, global_state)
 
         return final_global_state, final_env_state, rewards, dones
+
+    # ------------------------------------------------------------------
+    # Egocentric Reset / Step (return (A, obs_dim) observations)
+    # ------------------------------------------------------------------
+
+    def reset_ego(self, key: jnp.ndarray) -> tuple[jnp.ndarray, EnvState]:
+        """Reset and return egocentric observations.
+
+        Returns:
+            ``(obs, env_state)`` where ``obs`` has shape ``(A, obs_dim)``.
+        """
+        _, env_state = self.env.reset(key)
+        obs = self.extract_all_agent_obs(env_state)
+        return obs, env_state
+
+    def step_ego(
+        self,
+        key: jnp.ndarray,
+        env_state: EnvState,
+        actions: jnp.ndarray,
+        temperature: jnp.ndarray | float | None = None,
+    ) -> tuple[jnp.ndarray, EnvState, jnp.ndarray, jnp.ndarray]:
+        """Step and return egocentric observations.
+
+        Dispatches to continuous or discrete action mapping based on
+        ``self.action_type``.
+
+        Returns:
+            ``(obs, new_env_state, rewards, dones)``
+            where ``obs`` has shape ``(A, obs_dim)``.
+        """
+        if self.action_type == "discrete":
+            env_actions = self.map_discrete_actions(
+                actions, env_state.seller_positions,
+            )
+        else:
+            env_actions = self.map_actions(actions)
+        k_spawn, k_sales = jax.random.split(key)
+
+        env_state = self.env.step_remove_purchased(env_state)
+        env_state = self.env.step_spawn_buyers(k_spawn, env_state)
+        env_state = self.env.step_apply_actions(env_state, env_actions)
+
+        running_sales, bought_from = self.env._process_sales(
+            k_sales,
+            env_state.seller_positions,
+            env_state.seller_prices,
+            env_state.seller_qualities,
+            env_state.buyer_positions,
+            env_state.buyer_valid,
+            env_state.buyer_values,
+            env_state.buyer_quality_tastes,
+            env_state.buyer_distance_factors,
+            temperature=temperature,
+        )
+
+        revenue = running_sales * env_state.seller_prices
+        if self.env.include_quality:
+            prod_cost = self.env.production_cost_factor * env_state.seller_qualities**2
+        else:
+            prod_cost = jnp.float32(0.0)
+        move_cost = self.env.movement_cost * env_state.seller_last_movement
+        rewards = revenue - prod_cost - move_cost
+
+        new_step = env_state.step + 1
+        new_env_state = env_state.replace(  # type: ignore[attr-defined]
+            seller_running_sales=running_sales,
+            buyer_purchased_from=bought_from,
+            step=new_step,
+        )
+
+        done = new_step >= self.env.max_env_steps
+        dones = jnp.full(self.env.num_sellers, done)
+
+        obs = self.extract_all_agent_obs(new_env_state)
+        return obs, new_env_state, rewards, dones
+
+    def step_autoreset_ego(
+        self,
+        key: jnp.ndarray,
+        env_state: EnvState,
+        actions: jnp.ndarray,
+        temperature: jnp.ndarray | float | None = None,
+    ) -> tuple[jnp.ndarray, EnvState, jnp.ndarray, jnp.ndarray]:
+        """Step with auto-reset, returning egocentric observations.
+
+        Returns:
+            ``(obs, env_state, rewards, dones)``
+        """
+        k_step, k_reset = jax.random.split(key)
+
+        obs, new_env_state, rewards, dones = self.step_ego(
+            k_step, env_state, actions, temperature=temperature,
+        )
+
+        done = dones[0]
+
+        reset_obs, reset_env_state = self.reset_ego(k_reset)
+
+        final_env_state = jax.tree.map(
+            lambda r, s: jnp.where(done, r, s),
+            reset_env_state,
+            new_env_state,
+        )
+        final_obs = jnp.where(done, reset_obs, obs)
+
+        return final_obs, final_env_state, rewards, dones

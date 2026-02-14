@@ -21,7 +21,7 @@ entropy_coef_end: 0.001
 entropy_coef_anneal_frac: 0.8
 
 # Softmax buyer-choice temperature annealing
-buyer_choice_temp_start: 2.0
+buyer_choice_temp_start: null
 buyer_choice_temp_end: 0.05
 buyer_choice_temp_anneal_frac: 0.8
 

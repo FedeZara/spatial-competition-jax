@@ -428,6 +428,7 @@ class BestResponseTrainer:
 
             # PPO clipped objective
             ratio = jnp.exp(new_log_probs - batch.log_probs)
+            ratio = jnp.clip(ratio, 1e-4, 10.0)  # prevent loss spikes from stale data
             surr1 = ratio * batch.advantages
             surr2 = (
                 jnp.clip(ratio, 1 - self.clip_epsilon, 1 + self.clip_epsilon)

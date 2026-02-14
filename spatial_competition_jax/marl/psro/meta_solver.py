@@ -19,7 +19,7 @@ def projected_replicator_dynamics(
     payoff_matrix: np.ndarray,
     *,
     num_iters: int = 50_000,
-    dt: float = 0.1,
+    dt: float = 0.01,
     tol: float = 1e-8,
 ) -> np.ndarray:
     """Find an approximate symmetric Nash equilibrium via PRD.
@@ -29,18 +29,21 @@ def projected_replicator_dynamics(
     ``(sigma, sigma)`` is an approximate Nash equilibrium of
     ``(U, U^T)``.
 
-    The update rule is the discrete-time replicator dynamic::
+    Uses the exponential (multiplicative weights) form of the
+    replicator dynamic::
 
-        sigma_i ← sigma_i * (1 + dt * (e_i^T U sigma - sigma^T U sigma))
+        sigma_i ← sigma_i * exp(dt * (e_i^T U sigma - sigma^T U sigma))
 
-    followed by projection onto the probability simplex (clamp + renormalise).
+    followed by renormalisation.  This is equivalent to mirror descent
+    with KL divergence and is unconditionally stable (no negative
+    weights, no clamp needed) regardless of payoff scale.
 
     Args:
         payoff_matrix: ``(K, K)`` payoff matrix where ``U[i, j]`` is the
             row player's payoff when playing pure strategy *i* against
             column player's pure strategy *j*.
         num_iters: Maximum number of iterations.
-        dt: Step size for the replicator update.
+        dt: Step size for the exponential update.
         tol: Convergence tolerance on the strategy change.
 
     Returns:
@@ -60,13 +63,15 @@ def projected_replicator_dynamics(
         # Average payoff under current mixture
         avg = sigma @ expected  # scalar
 
-        # Replicator update
-        new_sigma = sigma * (1.0 + dt * (expected - avg))
+        # Exponential / multiplicative-weights update with adaptive dt
+        advantages = expected - avg
+        max_adv = np.max(np.abs(advantages))
+        dt_eff = min(dt, 1.0 / (max_adv + 1e-12))
+        new_sigma = sigma * np.exp(dt_eff * advantages)
 
-        # Project onto probability simplex
-        new_sigma = np.maximum(new_sigma, 0.0)
+        # Renormalise onto the probability simplex
         total = new_sigma.sum()
-        if total < 1e-12:
+        if total < 1e-300:
             # Degenerate case – fall back to uniform
             new_sigma = np.ones(K, dtype=np.float64) / K
         else:

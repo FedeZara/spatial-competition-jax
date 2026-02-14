@@ -96,6 +96,7 @@ class PSROConfig:
     num_psro_iterations: int = 10
     num_br_updates: int = 5000
     num_eval_episodes: int = 50
+    num_initial_policies: int = 1
 
     # Warm-starting best-response from population
     warmstart_br: bool = True

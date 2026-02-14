@@ -95,16 +95,26 @@ class PSROLoop:
     def seed_population(
         self,
         seed: int | None = None,
+        num_seeds: int = 1,
     ) -> None:
-        """Add an initial random policy to the population."""
+        """Add initial random policies to the population.
+
+        Args:
+            seed: Base random seed.
+            num_seeds: Number of diverse random policies to add.
+                More seeds give the meta-game a richer starting
+                point, helping PRD find mixed strategies earlier.
+        """
         if seed is None:
             seed = self.config.train.seed
-        key = jax.random.PRNGKey(seed)
         dummy = jnp.zeros(self.wrapper.state_dim)
-        params = self.network.init(key, dummy)
-        self.population.append(params)
-        self.meta_strategy = np.ones(1, dtype=np.float64)
-        print(f"Seeded population with 1 random policy (seed={seed})")
+        for i in range(num_seeds):
+            key = jax.random.PRNGKey(seed + i)
+            params = self.network.init(key, dummy)
+            self.population.append(params)
+        K = len(self.population)
+        self.meta_strategy = np.ones(K, dtype=np.float64) / K
+        print(f"Seeded population with {num_seeds} random policies (base seed={seed})")
 
     def add_pretrained(self, checkpoint_path: str | Path) -> None:
         """Add a pretrained single-agent checkpoint to the population."""
@@ -136,7 +146,9 @@ class PSROLoop:
             num_iterations = self.config.psro.num_psro_iterations
 
         if not self.population:
-            self.seed_population()
+            self.seed_population(
+                num_seeds=self.config.psro.num_initial_policies,
+            )
 
         exploitability_history: list[float] = []
 
@@ -177,9 +189,17 @@ class PSROLoop:
                 prefix="psro",
             )
 
-            # ── 3. Train best response ────────────────────────────────
+            # ── 3. Train best response against uniform mixture ────────
+            #    (Nash meta-strategy is used only for exploitability;
+            #    uniform mixing ensures the BR sees all opponents and
+            #    the population stays diverse.)
             print("  Training best response …")
-            new_params = self._train_best_response(iteration)
+            new_params = self._train_best_response(iteration, use_uniform=True)
+
+            # ── Guard: reject NaN / unstable parameters ─────────────
+            if _params_produce_nan(self.network, new_params, self.wrapper):
+                print("  ⚠ BR produced unstable params — skipping this iteration.")
+                continue
 
             # ── 4. Add to population ──────────────────────────────────
             self.population.append(new_params)
@@ -226,20 +246,30 @@ class PSROLoop:
     # Best-response training
     # ------------------------------------------------------------------
 
-    def _train_best_response(self, psro_iteration: int) -> Any:
+    def _train_best_response(
+        self, psro_iteration: int, *, use_uniform: bool = False,
+    ) -> Any:
         """Train a best-response policy and return its params."""
         cfg = self.config
 
+        # Opponent mixture: uniform over the whole population, or Nash
+        K = len(self.population)
+        br_strategy = (
+            np.ones(K, dtype=np.float64) / K
+            if use_uniform
+            else self.meta_strategy
+        )
+
         # Warm-start from the policy with highest meta-strategy weight
         warmstart_params = None
-        if cfg.psro.warmstart_br and len(self.population) > 0:
+        if cfg.psro.warmstart_br and K > 0:
             best_idx = int(np.argmax(self.meta_strategy))
             warmstart_params = self.population[best_idx]
 
         trainer = BestResponseTrainer(
             wrapper=self.wrapper,
             population=self.population,
-            meta_strategy=self.meta_strategy,
+            meta_strategy=br_strategy,
             hidden_dims=cfg.train.hidden_dims,
             num_envs=cfg.train.num_envs,
             rollout_length=cfg.train.rollout_length,
@@ -365,6 +395,25 @@ def _build_wrapper(config: Config) -> TrainingWrapper:
         buyer_choice_temperature=config.env.buyer_choice_temperature,
         blob_sigma=config.train.blob_sigma,
     )
+
+
+def _params_produce_nan(
+    network: SharedActorCritic,
+    params: Any,
+    wrapper: TrainingWrapper,
+) -> bool:
+    """Check if params contain NaN or produce NaN on a forward pass."""
+    # 1. Check raw parameter leaves
+    for leaf in jax.tree.leaves(params):
+        if jnp.any(jnp.isnan(leaf)).item() or jnp.any(jnp.isinf(leaf)).item():
+            return True
+    # 2. Run a forward pass on a zero state and check outputs
+    dummy = jnp.zeros(wrapper.state_dim)
+    outputs = network.apply(params, dummy)
+    for o in outputs:
+        if jnp.any(jnp.isnan(o)).item() or jnp.any(jnp.isinf(o)).item():
+            return True
+    return False
 
 
 def _fmt_vec(v: np.ndarray, precision: int = 3) -> str:

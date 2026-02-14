@@ -181,40 +181,50 @@ class PayoffTable:
 
         key = jax.random.PRNGKey(self.seed)
 
-        # Evaluate new rows (new policy as agent 0 vs all as agent 1)
+        # Evaluate all new matchups.  For a symmetric game each call
+        # yields both U[i,j] (agent 0 reward) and U[j,i] (agent 1 reward),
+        # so we only need to evaluate unordered pairs once.
+        new_pairs: set[tuple[int, int]] = set()
         for i in range(old_K, K):
             for j in range(K):
-                key, subkey = jax.random.split(key)
-                keys = jax.random.split(subkey, self.num_eval_episodes)
+                new_pairs.add((i, j))
+                new_pairs.add((j, i))   # symmetric counterpart
 
-                rewards = _evaluate_matchup_jit(
-                    self.network,
-                    self.wrapper,
-                    population[i],
-                    population[j],
-                    self.use_temp,
-                    self.temperature,
-                    keys,
-                )
-                # rewards: (num_episodes, 2)
-                new_matrix[i, j] = float(rewards[:, 0].mean())
-
-        # Evaluate new columns (existing policies as agent 0 vs new as agent 1)
+        # Remove pairs already computed
         for i in range(old_K):
-            for j in range(old_K, K):
-                key, subkey = jax.random.split(key)
-                keys = jax.random.split(subkey, self.num_eval_episodes)
+            for j in range(old_K):
+                new_pairs.discard((i, j))
 
-                rewards = _evaluate_matchup_jit(
-                    self.network,
-                    self.wrapper,
-                    population[i],
-                    population[j],
-                    self.use_temp,
-                    self.temperature,
-                    keys,
-                )
-                new_matrix[i, j] = float(rewards[:, 0].mean())
+        # Evaluate only unordered pairs (i, j) with i <= j
+        evaluated: set[tuple[int, int]] = set()
+        for i, j in sorted(new_pairs):
+            if (i, j) in evaluated:
+                continue
+
+            key, subkey = jax.random.split(key)
+            keys = jax.random.split(subkey, self.num_eval_episodes)
+
+            # Policy i as agent 0, policy j as agent 1
+            rewards = _evaluate_matchup_jit(
+                self.network,
+                self.wrapper,
+                population[i],
+                population[j],
+                self.use_temp,
+                self.temperature,
+                keys,
+            )
+            # rewards: (num_episodes, 2)
+            val_ij = float(rewards[:, 0].mean())  # agent 0 (policy i)
+            new_matrix[i, j] = val_ij if np.isfinite(val_ij) else 0.0
+
+            if i != j:
+                # Symmetric game: agent 1's reward = U[j, i]
+                val_ji = float(rewards[:, 1].mean())
+                new_matrix[j, i] = val_ji if np.isfinite(val_ji) else 0.0
+                evaluated.add((j, i))
+
+            evaluated.add((i, j))
 
         self._matrix = new_matrix
         self._size = K

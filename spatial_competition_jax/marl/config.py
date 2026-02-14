@@ -60,6 +60,10 @@ class TrainConfig:
     # Observation mode: "global" (old per-agent heads) or "egocentric"
     observation_mode: str = "global"
 
+    # Independent PPO: append one-hot agent ID to ego observations.
+    # Breaks weight sharing so each agent can learn a different strategy.
+    independent: bool = False
+
     # Optimization
     learning_rate: float = 3e-4
     max_grad_norm: float = 0.5

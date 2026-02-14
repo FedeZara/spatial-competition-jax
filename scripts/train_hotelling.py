@@ -167,6 +167,11 @@ def _train(
         num_price_bins=config.env.num_price_bins,
     )
 
+    # ── independent PPO: append agent IDs to ego obs ────────────────
+    if config.train.independent and config.train.observation_mode == "egocentric":
+        wrapper.enable_agent_id()
+        print(f"Independent: True (agent ID appended to obs)")
+
     # ── policy adapter ────────────────────────────────────────────────
     use_ego = config.train.observation_mode == "egocentric"
     policy = build_policy(config, wrapper)

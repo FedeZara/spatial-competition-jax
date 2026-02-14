@@ -13,7 +13,6 @@ transport_cost_exponent: 2.0
 new_buyers_per_step: 20
 max_env_steps: 100
 space_resolution: 50
-buyer_choice_temperature: 1.0
 
 # Include parent defaults
 _parent: default.yaml

@@ -20,14 +20,28 @@ action_type: discrete
 num_location_bins: 10
 num_price_bins: 11
 observation_mode: egocentric
+independent: true
 target_kl: 0.03
 
-# No buyer choice temperature — hard argmax, fixed env
+# No buyer choice temperature — hard argmax
 buyer_choice_temperature: null
 buyer_choice_temp_start: null
 
 # Include parent defaults for training hypers
 _parent: default.yaml
 
-# Override: smaller network for the simpler problem
-hidden_dims: [64, 64]
+# ── Training overrides ──────────────────────────────────
+# Larger network to learn conditional (ego-dependent) strategies
+hidden_dims: [128, 128]
+
+# Much more training — differentiation emerges late
+total_updates: 200000
+
+# Keep exploration alive: higher entropy floor
+entropy_coef: 0.02
+entropy_coef_start: 0.02
+entropy_coef_end: 0.005
+entropy_coef_anneal_frac: 0.9
+
+# More parallel envs for diverse starting positions
+num_envs: 128

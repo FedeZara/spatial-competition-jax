@@ -146,7 +146,7 @@ class TrainingWrapper:
         self._blob_dim = n_blob_channels * cells_per_channel
 
         self.state_dim = self._blob_dim + self._per_agent_dim * num_sellers
-        self.obs_dim = self.state_dim  # perfect information
+        self.obs_dim = self.state_dim  # perfect information (updated by enable_agent_id)
 
         # Action dimensions (split by distribution family)
         self.movement_dim = dimensions  # Gaussian (tanh-squashed)
@@ -161,6 +161,20 @@ class TrainingWrapper:
         self._ego_indices = jnp.array(
             np.stack([np.roll(np.arange(num_sellers), -i) for i in range(num_sellers)])
         )  # (A, A)
+
+        # One-hot agent IDs for independent PPO (appended to ego obs).
+        self._agent_ids = jnp.eye(num_sellers, dtype=jnp.float32)  # (A, A)
+        self._include_agent_id = False
+
+    def enable_agent_id(self) -> None:
+        """Append one-hot agent ID to egocentric observations.
+
+        Call this before training to enable independent PPO mode.
+        Increases ``obs_dim`` by ``num_agents``.
+        """
+        if not self._include_agent_id:
+            self._include_agent_id = True
+            self.obs_dim += self.num_agents
 
     # ------------------------------------------------------------------
     # Observation / action helpers
@@ -282,7 +296,13 @@ class TrainingWrapper:
         # Broadcast blob channels to all agents (shared)
         blob_broadcast = jnp.broadcast_to(blob_vec, (self.num_agents, blob_vec.shape[0]))
 
-        return jnp.concatenate([blob_broadcast, ego_flat], axis=-1)  # (A, obs_dim)
+        parts = [blob_broadcast, ego_flat]
+
+        # Optional one-hot agent ID for independent PPO
+        if self._include_agent_id:
+            parts.append(self._agent_ids)
+
+        return jnp.concatenate(parts, axis=-1)  # (A, obs_dim)
 
     def map_actions(self, actions: jnp.ndarray) -> dict[str, jnp.ndarray]:
         """Map continuous network actions to the env action dict.

@@ -21,7 +21,7 @@ num_location_bins: 10
 num_price_bins: 11
 observation_mode: egocentric
 independent: true
-target_kl: 0.03
+target_kl: 0.1
 
 # No buyer choice temperature — hard argmax
 buyer_choice_temperature: null

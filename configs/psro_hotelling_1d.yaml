@@ -1,0 +1,34 @@
+# PSRO configuration for 1D Hotelling (Linear City)
+# Inherits environment settings from hotelling_1d_quadratic.yaml
+
+_parent: hotelling_1d_quadratic.yaml
+
+# Use egocentric observations for symmetric PSRO
+observation_mode: egocentric
+
+# PSRO outer loop
+num_psro_iterations: 500
+num_br_updates: 50000
+num_eval_episodes: 32
+num_initial_policies: 1
+warmstart_br: false
+br_mix_alpha_start: 0.5
+br_mix_alpha_end: 0.1
+br_mix_alpha_anneal_frac: 0.7
+br_patience: 20
+br_early_stop_delta: 0.05
+log_interval: 50
+save_interval: 2
+
+# Override training hypers for best-response oracle
+total_updates: 50000
+num_envs: 256
+rollout_length: 128
+
+# ── Entropy fix for BR ──────────────────────────────────
+# Lower entropy for BR so it can converge to a sharp response
+# before early stopping triggers.
+entropy_coef: 0.003
+entropy_coef_start: 0.005
+entropy_coef_end: 0.001
+entropy_coef_anneal_frac: 0.3

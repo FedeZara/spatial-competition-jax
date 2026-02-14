@@ -10,7 +10,11 @@ import jax
 
 from spatial_competition_jax.marl.config import Config
 from spatial_competition_jax.marl.mappo.evaluation import evaluate_policy
-from spatial_competition_jax.marl.mappo.networks import SharedActorCritic
+from spatial_competition_jax.marl.mappo.networks import (
+    DiscreteActorCritic,
+    SharedActorCritic,
+)
+from spatial_competition_jax.marl.mappo.policy import ContinuousPolicy, DiscretePolicy
 from spatial_competition_jax.marl.training_wrapper import TrainingWrapper
 from spatial_competition_jax.marl.utils.checkpoints import load_checkpoint
 from spatial_competition_jax.marl.utils.device import resolve_device
@@ -87,15 +91,30 @@ def main() -> None:
             max_env_steps=config.env.max_env_steps,
             buyer_choice_temperature=config.env.buyer_choice_temperature,
             blob_sigma=config.train.blob_sigma,
+            action_type=config.env.action_type,
+            num_location_bins=config.env.num_location_bins,
+            num_price_bins=config.env.num_price_bins,
         )
 
-        # ── network ───────────────────────────────────────────────────
-        network = SharedActorCritic(
-            movement_dim=wrapper.movement_dim,
-            bounded_dim=wrapper.bounded_dim,
-            num_agents=wrapper.num_agents,
-            hidden_dims=tuple(config.train.hidden_dims),
-        )
+        # ── policy ────────────────────────────────────────────────────
+        hidden_dims = tuple(config.train.hidden_dims)
+        policy: ContinuousPolicy | DiscretePolicy
+        if config.env.action_type == "discrete":
+            discrete_net = DiscreteActorCritic(
+                num_actions=wrapper.num_actions,
+                num_agents=wrapper.num_agents,
+                hidden_dims=hidden_dims,
+            )
+            policy = DiscretePolicy(discrete_net)
+        else:
+            continuous_net = SharedActorCritic(
+                movement_dim=wrapper.movement_dim,
+                bounded_dim=wrapper.bounded_dim,
+                num_agents=wrapper.num_agents,
+                hidden_dims=hidden_dims,
+            )
+            policy = ContinuousPolicy(continuous_net)
+
         params = jax.device_put(checkpoint["params"], device)
 
         # ── evaluate ──────────────────────────────────────────────────
@@ -113,7 +132,7 @@ def main() -> None:
             eval_temperature = config.train.buyer_choice_temp_end
 
         results = evaluate_policy(
-            network=network,
+            policy=policy,
             params=params,
             wrapper=wrapper,
             num_episodes=args.num_episodes,

@@ -92,6 +92,10 @@ class TrainingWrapper:
         max_env_steps: int = 100,
         buyer_choice_temperature: float | None = None,
         blob_sigma: float = 1.5,
+        # Discrete action space
+        action_type: str = "continuous",
+        num_location_bins: int = 10,
+        num_price_bins: int = 10,
     ) -> None:
         self.env = SpatialCompetitionEnv(
             num_sellers=num_sellers,
@@ -121,6 +125,12 @@ class TrainingWrapper:
         self.include_quality = include_quality
         self.max_quality = max_quality
         self.blob_sigma = blob_sigma
+
+        # Discrete action space config
+        self.action_type = action_type
+        self.num_location_bins = num_location_bins
+        self.num_price_bins = num_price_bins
+        self.num_actions = num_location_bins * num_price_bins  # joint categorical size
 
         # Observation / state dimensions
         self._per_agent_dim = dimensions + 1  # position + price
@@ -207,7 +217,7 @@ class TrainingWrapper:
         return jnp.concatenate(channels)
 
     def map_actions(self, actions: jnp.ndarray) -> dict[str, jnp.ndarray]:
-        """Map network actions to the env action dict.
+        """Map continuous network actions to the env action dict.
 
         Movement dims (indices ``[:D]``) are in ``[-1, 1]`` (tanh Gaussian)
         and get scaled by ``max_step_size``.
@@ -231,6 +241,54 @@ class TrainingWrapper:
             result["quality"] = quality
 
         return result
+
+    def map_discrete_actions(
+        self,
+        actions: jnp.ndarray,
+        seller_positions: jnp.ndarray,
+    ) -> dict[str, jnp.ndarray]:
+        """Map discrete action indices to the env action dict.
+
+        Each action is a joint index in ``[0, num_location_bins * num_price_bins)``.
+        Decodes into ``(loc_bin, price_bin)`` and converts to
+        absolute position / price.
+
+        Movement is computed as the delta from the current position to
+        the target bin centre.
+
+        Args:
+            actions: ``(num_agents, 1)`` float32 bin indices.
+            seller_positions: ``(num_agents, D)`` int32 current positions.
+
+        Returns:
+            Dict with ``'movement'``, ``'price'``.
+        """
+        idx = actions[:, 0].astype(jnp.int32)  # (A,)
+        loc_bin = idx // self.num_price_bins
+        price_bin = idx % self.num_price_bins
+
+        # Target position: evenly spaced bins in [0, space_resolution)
+        # bin_centre maps bin i to the centre of the i-th segment
+        n_loc = self.num_location_bins
+        target_pos = (
+            (loc_bin.astype(jnp.float32) + 0.5)
+            / n_loc
+            * self.space_resolution
+        ).astype(jnp.int32)
+        target_pos = jnp.clip(target_pos, 0, self.space_resolution - 1)
+
+        # Movement delta (in normalised [0, 1] coords)
+        current_norm = seller_positions.astype(jnp.float32) / self.space_resolution
+        target_norm = target_pos[:, None].astype(jnp.float32) / self.space_resolution
+        movement = target_norm - current_norm  # (A, D)
+
+        # Price: evenly spaced bins in [0, max_price]
+        n_price = self.num_price_bins
+        price = (
+            price_bin.astype(jnp.float32) / jnp.maximum(n_price - 1, 1)
+        ) * self.max_price
+
+        return {"movement": movement, "price": price}
 
     # ------------------------------------------------------------------
     # Reset / Step
@@ -262,14 +320,20 @@ class TrainingWrapper:
         Args:
             key: PRNG key.
             env_state: Current ``EnvState``.
-            actions: ``(num_agents, action_dim)``.
+            actions: ``(num_agents, action_dim)`` for continuous,
+                or ``(num_agents, 1)`` for discrete.
             temperature: Optional dynamic buyer-choice temperature
                 override (for annealing during training).
 
         Returns:
             ``(global_state, new_env_state, rewards, dones)``
         """
-        env_actions = self.map_actions(actions)
+        if self.action_type == "discrete":
+            env_actions = self.map_discrete_actions(
+                actions, env_state.seller_positions,
+            )
+        else:
+            env_actions = self.map_actions(actions)
         k_spawn, k_sales = jax.random.split(key)
 
         env_state = self.env.step_remove_purchased(env_state)

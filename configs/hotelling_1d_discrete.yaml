@@ -1,0 +1,29 @@
+# 1D Hotelling with discrete actions (10 location bins × 10 price bins)
+# Quadratic transport costs (d'Aspremont et al., 1979)
+
+# Environment
+dimensions: 1
+num_sellers: 2
+max_price: 10.0
+include_quality: false
+movement_cost: 0.0
+transport_cost: 5.0
+transportation_cost_norm: 2.0
+transport_cost_exponent: 2.0
+new_buyers_per_step: 20
+max_env_steps: 100
+space_resolution: 10
+
+# Discrete action space
+action_type: discrete
+num_location_bins: 10
+num_price_bins: 10
+
+# Softmax buyer choice
+buyer_choice_temperature: 1.0
+
+# Include parent defaults for training hypers
+_parent: default.yaml
+
+# Override: smaller network for the simpler problem
+hidden_dims: [64, 64]

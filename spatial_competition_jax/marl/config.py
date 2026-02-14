@@ -31,6 +31,11 @@ class EnvConfig:
     space_resolution: int = 100
     buyer_choice_temperature: float | None = None
 
+    # Discrete action space (used when action_type="discrete")
+    action_type: str = "continuous"  # "continuous" or "discrete"
+    num_location_bins: int = 10
+    num_price_bins: int = 10
+
 
 @dataclass
 class TrainConfig:

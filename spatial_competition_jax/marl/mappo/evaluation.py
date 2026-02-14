@@ -3,17 +3,15 @@
 from __future__ import annotations
 
 import functools
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import jax
 import jax.numpy as jnp
 
-from spatial_competition_jax.marl.mappo.networks import (
-    SharedActorCritic,
-    deterministic_actions,
-    sample_actions,
-)
 from spatial_competition_jax.marl.training_wrapper import TrainingWrapper
+
+if TYPE_CHECKING:
+    from spatial_competition_jax.marl.mappo.policy import PolicyAdapter
 
 # ---------------------------------------------------------------------------
 # JIT-compiled, vmapped evaluation kernel
@@ -22,7 +20,7 @@ from spatial_competition_jax.marl.training_wrapper import TrainingWrapper
 
 @functools.partial(jax.jit, static_argnums=(0, 1, 4, 5))
 def _eval_episodes_jit(
-    network: SharedActorCritic,
+    policy: PolicyAdapter,
     wrapper: TrainingWrapper,
     params: Any,
     keys: jnp.ndarray,
@@ -36,7 +34,7 @@ def _eval_episodes_jit(
     across episodes so the entire evaluation is a single fused kernel.
 
     Args:
-        network: ``SharedActorCritic`` (static).
+        policy: ``PolicyAdapter`` (static).
         wrapper: ``TrainingWrapper`` (static).
         params: Network parameters.
         keys: ``(num_episodes, 2)`` PRNG keys.
@@ -64,9 +62,9 @@ def _eval_episodes_jit(
             state_batch = global_state[None, ...]  # add batch dim
 
             if deterministic:
-                actions, _ = deterministic_actions(network, params, state_batch)
+                actions, _ = policy.deterministic(params, state_batch)
             else:
-                actions, _, _ = sample_actions(network, params, state_batch, action_key)
+                actions, _, _ = policy.sample(params, state_batch, action_key)
             actions = actions[0]  # remove batch dim → (A, action_dim)
 
             if use_temp:
@@ -103,12 +101,12 @@ def _eval_episodes_jit(
 
 
 # ---------------------------------------------------------------------------
-# Public API (unchanged signature)
+# Public API
 # ---------------------------------------------------------------------------
 
 
 def evaluate_policy(
-    network: SharedActorCritic,
+    policy: PolicyAdapter,
     params: dict,
     wrapper: TrainingWrapper,
     num_episodes: int = 10,
@@ -122,7 +120,7 @@ def evaluate_policy(
     ``jax.lax.scan`` for the inner step loop — fully JIT-compiled.
 
     Args:
-        network: ``SharedActorCritic`` module.
+        policy: ``PolicyAdapter`` instance.
         params: Network parameters.
         wrapper: :class:`TrainingWrapper` for the environment.
         num_episodes: Number of evaluation episodes.
@@ -142,7 +140,7 @@ def evaluate_policy(
     keys = jax.random.split(key, num_episodes)
 
     total_rewards, all_positions, all_prices = _eval_episodes_jit(
-        network, wrapper, params, keys, deterministic, use_temp, temp_arr,
+        policy, wrapper, params, keys, deterministic, use_temp, temp_arr,
     )
 
     # total_rewards: (num_episodes, num_agents)

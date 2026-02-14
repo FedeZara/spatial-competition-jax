@@ -1,14 +1,17 @@
 """MAPPO algorithm implementation in JAX.
 
-Uses a single :class:`SharedActorCritic` network with ``jax.vmap`` for
-environment vectorisation and ``jax.lax.scan`` for rollout collection
-and PPO updates.
+Network-agnostic: all distribution-specific logic lives behind a
+:class:`PolicyAdapter` (see :mod:`policy`).  The algorithm itself only
+calls ``policy.sample``, ``policy.evaluate``, ``policy.value``.
+
+Environment vectorisation uses ``jax.vmap``; rollout collection and
+PPO updates use ``jax.lax.scan``.
 """
 
 from __future__ import annotations
 
 import functools
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import jax
 import jax.numpy as jnp
@@ -22,17 +25,11 @@ from spatial_competition_jax.marl.mappo.buffer import (
     make_minibatches,
     normalize_advantages,
 )
-from spatial_competition_jax.marl.mappo.networks import (
-    EPS,
-    SharedActorCritic,
-    _entropy_beta,
-    _entropy_gaussian,
-    _log_prob_beta,
-    _log_prob_tanh_normal,
-    symexp,
-    symlog,
-)
+from spatial_competition_jax.marl.mappo.networks import symlog
 from spatial_competition_jax.marl.training_wrapper import TrainingWrapper
+
+if TYPE_CHECKING:
+    from spatial_competition_jax.marl.mappo.policy import PolicyAdapter
 
 
 def linear_anneal(
@@ -67,7 +64,7 @@ compute_temperature = linear_anneal
 
 
 class MAPPO:
-    """MAPPO with unified actor-critic for perfect-information MARL.
+    """MAPPO with a pluggable actor-critic policy.
 
     All heavy computation (rollout collection, PPO update) is
     JIT-compiled.  Environment vectorisation happens through
@@ -77,9 +74,10 @@ class MAPPO:
     def __init__(
         self,
         wrapper: TrainingWrapper,
+        policy: PolicyAdapter,
+        *,
         num_envs: int = 16,
         rollout_length: int = 512,
-        hidden_dims: list[int] | None = None,
         gamma: float = 0.99,
         gae_lambda: float = 0.95,
         clip_epsilon: float = 0.2,
@@ -92,6 +90,7 @@ class MAPPO:
         seed: int = 42,
     ) -> None:
         self.wrapper = wrapper
+        self.policy = policy
         self.num_envs = num_envs
         self.rollout_length = rollout_length
         self.gamma = gamma
@@ -102,36 +101,26 @@ class MAPPO:
         self.ppo_epochs = ppo_epochs
         self.num_minibatches = num_minibatches
 
-        if hidden_dims is None:
-            hidden_dims = [256, 256]
-
-        # ── network ────────────────────────────────────────────────────
-        self.network = SharedActorCritic(
-            movement_dim=wrapper.movement_dim,
-            bounded_dim=wrapper.bounded_dim,
-            num_agents=wrapper.num_agents,
-            hidden_dims=tuple(hidden_dims),
-        )
-
         key = jax.random.PRNGKey(seed)
         key, init_key, reset_key = jax.random.split(key, 3)
 
+        # ── initialise parameters ─────────────────────────────────────
         dummy_state = jnp.zeros(wrapper.state_dim)
-        params = self.network.init(init_key, dummy_state)
+        params = policy.init(init_key, dummy_state)
 
-        # ── optimizer ──────────────────────────────────────────────────
+        # ── optimizer ─────────────────────────────────────────────────
         tx = optax.chain(
             optax.clip_by_global_norm(max_grad_norm),
             optax.adam(learning_rate),
         )
 
         self.train_state: TrainState = TrainState.create(
-            apply_fn=self.network.apply,
+            apply_fn=None,  # not used – we go through policy adapter
             params=params,
             tx=tx,
         )
 
-        # ── initial environment states ─────────────────────────────────
+        # ── initial environment states ────────────────────────────────
         reset_keys = jax.random.split(reset_key, num_envs)
         self.global_states, self.env_states = jax.vmap(wrapper.reset)(reset_keys)
 
@@ -156,8 +145,6 @@ class MAPPO:
         """
         self.key, subkey = jax.random.split(self.key)
 
-        # Convert temperature to a JAX scalar (or use a sentinel 0.0
-        # that will be ignored when softmax is disabled on the env).
         temp_arr = jnp.float32(temperature if temperature is not None else 0.0)
 
         transitions, advantages, returns, env_states, global_states = self._collect_rollout(
@@ -235,40 +222,18 @@ class MAPPO:
         temperature: jnp.ndarray,
     ) -> Any:
         """Collect a rollout of *rollout_length* steps using ``jax.lax.scan``."""
-        # Determine whether to pass temperature to step_autoreset.
-        # When softmax is enabled on the env, we always pass the
-        # dynamic temperature.  Otherwise temperature is unused.
         _use_temp = self.wrapper.env.buyer_choice_temperature is not None
-        _move_dim = self.network.movement_dim
 
         def scan_fn(carry: Any, _: Any) -> Any:
             env_states, global_states, key = carry
-            key, step_key, k_gauss, k_beta = jax.random.split(key, 4)
+            key, step_key, sample_key = jax.random.split(key, 3)
 
-            # Forward pass – get distribution params and values
-            gauss_means, gauss_log_stds, beta_alphas, beta_betas, values_symlog = self.network.apply(  # type: ignore[misc]
-                train_state.params,
-                global_states,
+            # ── Policy forward: sample actions ────────────────────
+            actions, log_probs, values = self.policy.sample(
+                train_state.params, global_states, sample_key,
             )
-            # Critic outputs in symlog space; decompress to real scale for GAE
-            values = symexp(values_symlog)
-            gauss_stds = jnp.exp(gauss_log_stds)
 
-            # --- Sample movement (tanh-squashed Gaussian) ---
-            raw_movement = gauss_means + gauss_stds * jax.random.normal(k_gauss, gauss_means.shape)
-            movement_actions = jnp.tanh(raw_movement)
-            lp_move = _log_prob_tanh_normal(gauss_means, gauss_stds, raw_movement, movement_actions)
-
-            # --- Sample bounded (Beta) ---
-            bounded_actions = jax.random.beta(k_beta, beta_alphas, beta_betas)
-            bounded_actions = jnp.clip(bounded_actions, EPS, 1.0 - EPS)
-            lp_bounded = _log_prob_beta(beta_alphas, beta_betas, bounded_actions)
-
-            # Concatenate into flat action vector
-            actions = jnp.concatenate([movement_actions, bounded_actions], axis=-1)
-            log_probs = lp_move + lp_bounded
-
-            # Step all envs (vmapped)
+            # ── Step all envs (vmapped) ───────────────────────────
             step_keys = jax.random.split(step_key, self.num_envs)
             if _use_temp:
                 next_global_states, next_env_states, rewards, dones = jax.vmap(
@@ -297,14 +262,12 @@ class MAPPO:
             length=self.rollout_length,
         )
 
-        # Bootstrap value (decompress from symlog to real scale)
-        _, _, _, _, bootstrap_values_symlog = self.network.apply(  # type: ignore[misc]
-            train_state.params,
-            final_global_states,
+        # Bootstrap value
+        bootstrap_values = self.policy.value(
+            train_state.params, final_global_states,
         )
-        bootstrap_values = symexp(bootstrap_values_symlog)
 
-        # GAE (operates in real scale)
+        # GAE
         advantages, returns = compute_gae(
             transitions.rewards,
             transitions.values,
@@ -332,28 +295,12 @@ class MAPPO:
         entropy_coef: jnp.ndarray,
     ) -> tuple[TrainState, dict[str, jnp.ndarray]]:
         """Run *ppo_epochs* of PPO updates using ``jax.lax.scan``."""
-        _move_dim = self.network.movement_dim
 
         def loss_fn(params: Any, batch: RolloutBatch) -> tuple[jnp.ndarray, dict[str, jnp.ndarray]]:
-            gauss_means, gauss_log_stds, beta_alphas, beta_betas, values = self.network.apply(params, batch.states)  # type: ignore[misc]
-            gauss_stds = jnp.exp(gauss_log_stds)
-
-            # Split stored actions into movement / bounded
-            movement_actions = batch.actions[..., :_move_dim]
-            bounded_actions = batch.actions[..., _move_dim:]
-
-            # --- Movement log-prob (tanh-squashed Gaussian) ---
-            clipped_move = jnp.clip(movement_actions, -1.0 + EPS, 1.0 - EPS)
-            raw_movement = jnp.arctanh(clipped_move)
-            lp_move = _log_prob_tanh_normal(gauss_means, gauss_stds, raw_movement, movement_actions)
-
-            # --- Bounded log-prob (Beta) ---
-            lp_bounded = _log_prob_beta(beta_alphas, beta_betas, bounded_actions)
-
-            new_log_probs = lp_move + lp_bounded
-
-            # --- Entropy ---
-            entropy = _entropy_gaussian(gauss_log_stds) + _entropy_beta(beta_alphas, beta_betas)
+            # ── Policy evaluate: log-probs, entropy, values ───────
+            new_log_probs, entropy, values = self.policy.evaluate(
+                params, batch.states, batch.actions,
+            )
 
             # PPO clipped objective
             ratio = jnp.exp(new_log_probs - batch.log_probs)

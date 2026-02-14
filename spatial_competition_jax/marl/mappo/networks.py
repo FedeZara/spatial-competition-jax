@@ -1,19 +1,14 @@
-"""Shared Actor-Critic network implemented in Flax linen.
+"""Actor-Critic networks implemented in Flax linen.
 
-Architecture:
+Two architectures are provided:
 
-    Global State -> [Shared Backbone] -> Features
-                            |
-                +-----------+-----------+
-                |           |           |
-          [Gauss Heads] [Beta Heads] [Critic Head]
-          (movement)   (price/qual)  (all agents)
-                |           |           |
-          Movement      Bounded      Values (A,)
-          (A, move_dim) (A, bnd_dim)
+``SharedActorCritic``
+    Continuous actions via tanh-squashed Gaussian (movement) and
+    Beta distributions (price / quality).
 
-Movement uses a tanh-squashed Gaussian; price and (optionally)
-quality use a Beta distribution.
+``DiscreteActorCritic``
+    Discrete actions via a joint Categorical over
+    ``num_actions = num_location_bins * num_price_bins`` options.
 """
 
 from __future__ import annotations
@@ -352,3 +347,90 @@ def deterministic_actions(
 
     actions = jnp.concatenate([movement_actions, bounded_actions], axis=-1)
     return actions, values
+
+
+# ---------------------------------------------------------------------------
+# Discrete Actor-Critic (joint Categorical)
+# ---------------------------------------------------------------------------
+
+
+class DiscreteActorCritic(nn.Module):
+    """Actor-Critic with a joint Categorical over discrete actions.
+
+    Each agent independently picks one of ``num_actions`` options per
+    step, where each option encodes a (location, price) pair.
+
+    Architecture::
+
+        Global State -> [Shared Backbone] -> Features
+                                |
+                    +-----------+-----------+
+                    |                       |
+              [Per-Agent Logit Heads]  [Critic Head]
+              (A, num_actions)         (A,)
+
+    ``__call__`` returns ``(logits, values)`` both in float32.
+    """
+
+    num_actions: int
+    num_agents: int
+    hidden_dims: Sequence[int] = (256, 256)
+    dtype: Dtype = jnp.bfloat16
+    param_dtype: Dtype = jnp.float32
+
+    @nn.compact
+    def __call__(
+        self, state: jnp.ndarray,
+    ) -> tuple[jnp.ndarray, jnp.ndarray]:
+        """Forward pass.
+
+        Args:
+            state: ``(..., state_dim)``
+
+        Returns:
+            ``(logits, values)`` with shapes:
+            - logits: ``(..., A, num_actions)``
+            - values: ``(..., A)``
+        """
+        x = state.astype(self.dtype)
+
+        # Shared backbone
+        for i, dim in enumerate(self.hidden_dims):
+            x = nn.Dense(
+                dim,
+                dtype=self.dtype,
+                param_dtype=self.param_dtype,
+                kernel_init=orthogonal(jnp.sqrt(2)),
+                name=f"backbone_{i}",
+            )(x)
+            x = nn.relu(x)
+
+        features = x
+
+        # Per-agent logit heads
+        logits_list = []
+        for i in range(self.num_agents):
+            logits_i = nn.Dense(
+                self.num_actions,
+                dtype=self.dtype,
+                param_dtype=self.param_dtype,
+                kernel_init=orthogonal(0.01),
+                name=f"logits_{i}",
+            )(features)
+            logits_list.append(logits_i)
+
+        logits = jnp.stack(logits_list, axis=-2)  # (..., A, num_actions)
+
+        # Critic head
+        values = nn.Dense(
+            self.num_agents,
+            dtype=self.dtype,
+            param_dtype=self.param_dtype,
+            kernel_init=orthogonal(1.0),
+            name="critic",
+        )(features)
+
+        return (
+            logits.astype(jnp.float32),
+            values.astype(jnp.float32),
+        )

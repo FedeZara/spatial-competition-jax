@@ -12,6 +12,15 @@ import jax
 from spatial_competition_jax.marl.config import Config
 from spatial_competition_jax.marl.mappo.evaluation import evaluate_policy
 from spatial_competition_jax.marl.mappo.mappo import MAPPO, linear_anneal
+from spatial_competition_jax.marl.mappo.networks import (
+    DiscreteActorCritic,
+    SharedActorCritic,
+)
+from spatial_competition_jax.marl.mappo.policy import (
+    ContinuousPolicy,
+    DiscretePolicy,
+    PolicyAdapter,
+)
 from spatial_competition_jax.marl.training_wrapper import TrainingWrapper
 from spatial_competition_jax.marl.utils.checkpoints import save_checkpoint
 from spatial_competition_jax.marl.utils.device import resolve_device
@@ -45,6 +54,27 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def build_policy(config: Config, wrapper: TrainingWrapper) -> PolicyAdapter:
+    """Build the appropriate PolicyAdapter from config."""
+    hidden_dims = tuple(config.train.hidden_dims)
+
+    if config.env.action_type == "discrete":
+        discrete_net = DiscreteActorCritic(
+            num_actions=wrapper.num_actions,
+            num_agents=wrapper.num_agents,
+            hidden_dims=hidden_dims,
+        )
+        return DiscretePolicy(discrete_net)
+
+    continuous_net = SharedActorCritic(
+        movement_dim=wrapper.movement_dim,
+        bounded_dim=wrapper.bounded_dim,
+        num_agents=wrapper.num_agents,
+        hidden_dims=hidden_dims,
+    )
+    return ContinuousPolicy(continuous_net)
+
+
 def main() -> None:
     """Run the training loop."""
     args = parse_args()
@@ -70,7 +100,8 @@ def main() -> None:
     # ── experiment name ────────────────────────────────────────────────
     if args.experiment_name is None:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        experiment_name = f"hotelling_{config.env.dimensions}d_{timestamp}"
+        action_tag = "disc" if config.env.action_type == "discrete" else "cont"
+        experiment_name = f"hotelling_{config.env.dimensions}d_{action_tag}_{timestamp}"
     else:
         experiment_name = args.experiment_name
 
@@ -84,12 +115,13 @@ def main() -> None:
     print("=" * 60)
     print("MAPPO Training (JAX)")
     print("=" * 60)
-    print(f"Experiment: {experiment_name}")
-    print(f"Device:     {device}")
-    print(f"Backend:    {jax.default_backend()}")
-    print(f"Num envs:   {config.train.num_envs}")
-    print(f"Rollout:    {config.train.rollout_length}")
-    print(f"Updates:    {config.train.total_updates}")
+    print(f"Experiment:  {experiment_name}")
+    print(f"Device:      {device}")
+    print(f"Backend:     {jax.default_backend()}")
+    print(f"Action type: {config.env.action_type}")
+    print(f"Num envs:    {config.train.num_envs}")
+    print(f"Rollout:     {config.train.rollout_length}")
+    print(f"Updates:     {config.train.total_updates}")
     print("=" * 60)
 
     # All array creation and JIT compilation is scoped to *device*.
@@ -124,18 +156,28 @@ def _train(
         max_env_steps=config.env.max_env_steps,
         buyer_choice_temperature=config.env.buyer_choice_temperature,
         blob_sigma=config.train.blob_sigma,
+        action_type=config.env.action_type,
+        num_location_bins=config.env.num_location_bins,
+        num_price_bins=config.env.num_price_bins,
     )
 
-    print(f"State dim:  {wrapper.state_dim}")
-    print(f"Action dim: {wrapper.action_dim}")
-    print(f"Num agents: {wrapper.num_agents}")
+    # ── policy adapter ────────────────────────────────────────────────
+    policy = build_policy(config, wrapper)
+
+    print(f"State dim:   {wrapper.state_dim}")
+    if config.env.action_type == "discrete":
+        print(f"Num actions: {wrapper.num_actions} "
+              f"({config.env.num_location_bins} loc × {config.env.num_price_bins} price)")
+    else:
+        print(f"Action dim:  {wrapper.action_dim}")
+    print(f"Num agents:  {wrapper.num_agents}")
 
     # ── MAPPO agent ────────────────────────────────────────────────────
     agent = MAPPO(
         wrapper=wrapper,
+        policy=policy,
         num_envs=config.train.num_envs,
         rollout_length=config.train.rollout_length,
-        hidden_dims=config.train.hidden_dims,
         gamma=config.train.gamma,
         gae_lambda=config.train.gae_lambda,
         clip_epsilon=config.train.clip_epsilon,
@@ -150,7 +192,7 @@ def _train(
 
     # Verify all initial arrays landed on the chosen device.
     _check_device = jax.tree.leaves(agent.train_state.params)[0]
-    print(f"Params on:  {_check_device.devices()}")
+    print(f"Params on:   {_check_device.devices()}")
 
     # ── annealing setup ────────────────────────────────────────────────
     use_temp_anneal = (
@@ -253,7 +295,7 @@ def _train(
             # Evaluation
             if update % config.train.eval_interval == 0:
                 eval_stats = evaluate_policy(
-                    network=agent.network,
+                    policy=policy,
                     params=agent.params,
                     wrapper=wrapper,
                     num_episodes=config.train.eval_episodes,
@@ -305,7 +347,7 @@ def _train(
     # ── final evaluation ───────────────────────────────────────────────
     print("Final evaluation …")
     final_eval = evaluate_policy(
-        network=agent.network,
+        policy=policy,
         params=agent.params,
         wrapper=wrapper,
         num_episodes=20,

@@ -126,7 +126,7 @@ def main() -> None:
         try:
             results = psro.run(num_iterations=args.num_iterations)
         except KeyboardInterrupt:
-            print("\n\nPSRO interrupted.")
+            print("\n\nPSRO interrupted — saving checkpoint …")
             results = {
                 "population": psro.population,
                 "meta_strategy": psro.meta_strategy,
@@ -136,6 +136,24 @@ def main() -> None:
                     else None
                 ),
             }
+
+            # Save interrupted checkpoint
+            import pickle
+
+            ckpt_path = logger.experiment_dir / "psro_interrupted.pkl"
+            ckpt_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(ckpt_path, "wb") as f:
+                pickle.dump(
+                    {
+                        "population": psro.population,
+                        "meta_strategy": psro.meta_strategy,
+                        "payoff_matrix": results["payoff_matrix"],
+                        "exploitability_history": [],
+                    },
+                    f,
+                )
+            print(f"Saved: {ckpt_path}")
+            print(f"Population size: {len(psro.population)}")
 
     # ── summary ───────────────────────────────────────────────────────
     if "exploitability_history" in results:

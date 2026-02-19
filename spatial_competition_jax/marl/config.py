@@ -71,7 +71,11 @@ class TrainConfig:
     # Network architecture
     hidden_dims: list[int] = field(default_factory=lambda: [256, 256])
 
-    # Gaussian blob observation encoding
+    # Observation type: "blob" (Gaussian-smoothed spatial maps) or
+    # "bin" (raw bin/grid observations from the environment).
+    obs_type: str = "blob"
+
+    # Gaussian blob observation encoding (only used when obs_type="blob")
     blob_sigma: float = 1.5
 
     # Logging

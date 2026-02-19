@@ -22,7 +22,9 @@ from spatial_competition_jax.marl.config import Config
 from spatial_competition_jax.marl.mappo.mappo import linear_anneal
 from spatial_competition_jax.marl.mappo.networks import (
     EgoActorCritic,
+    EgoConv1dFactoredDiscreteActorCritic,
     EgoDiscreteActorCritic,
+    EgoFactoredDiscreteActorCritic,
     SharedActorCritic,
     DiscreteActorCritic,
 )
@@ -31,6 +33,7 @@ from spatial_competition_jax.marl.mappo.policy import (
     DiscretePolicy,
     EgoContinuousPolicy,
     EgoDiscretePolicy,
+    EgoFactoredDiscretePolicy,
 )
 from spatial_competition_jax.marl.psro.best_response import BestResponseTrainer
 from spatial_competition_jax.marl.psro.meta_solver import (
@@ -487,6 +490,7 @@ def _build_wrapper(config: Config) -> TrainingWrapper:
         action_type=config.env.action_type,
         num_location_bins=config.env.num_location_bins,
         num_price_bins=config.env.num_price_bins,
+        obs_type=config.train.obs_type,
     )
 
 
@@ -504,13 +508,29 @@ def _build_single_agent_policy(
     hidden_dims = tuple(config.train.hidden_dims)
     ego = config.train.observation_mode == "egocentric"
     discrete = config.env.action_type == "discrete"
+    conv_bin = config.train.obs_type == "conv_bin"
+
+    if ego and discrete and conv_bin:
+        scalar_dim = config.env.dimensions + 1
+        if config.env.include_quality:
+            scalar_dim += 1
+        conv_net = EgoConv1dFactoredDiscreteActorCritic(
+            num_location_bins=wrapper.num_location_bins,
+            num_price_bins=wrapper.num_price_bins,
+            spatial_resolution=wrapper.space_resolution,
+            num_grid_channels=wrapper._conv_grid_channels,
+            num_scalar_features=scalar_dim,
+            mlp_hidden_dims=hidden_dims,
+        )
+        return EgoFactoredDiscretePolicy(conv_net, num_agents=1)
 
     if ego and discrete:
-        ego_disc_net = EgoDiscreteActorCritic(
-            num_actions=wrapper.num_actions,
+        ego_fac_net = EgoFactoredDiscreteActorCritic(
+            num_location_bins=wrapper.num_location_bins,
+            num_price_bins=wrapper.num_price_bins,
             hidden_dims=hidden_dims,
         )
-        return EgoDiscretePolicy(ego_disc_net, num_agents=1)
+        return EgoFactoredDiscretePolicy(ego_fac_net, num_agents=1)
 
     if ego:
         ego_cont_net = EgoActorCritic(

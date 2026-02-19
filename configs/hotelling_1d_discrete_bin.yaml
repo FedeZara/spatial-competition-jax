@@ -1,0 +1,11 @@
+# 1D Hotelling with discrete actions + bin-based observations
+# Uses the environment's native grid observations (local_view)
+# instead of Gaussian-blob encoding.
+#
+# Observation per agent:
+#   own_position (1) + own_price (1) + local_view (3×R) = 2 + 3×10 = 32
+
+_parent: hotelling_1d_discrete.yaml
+
+# Use bin-based observations from the environment
+obs_type: bin

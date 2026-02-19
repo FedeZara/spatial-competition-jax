@@ -14,6 +14,8 @@ from spatial_competition_jax.marl.mappo.networks import (
     ego_deterministic_actions,
     ego_discrete_deterministic,
     ego_discrete_sample,
+    ego_factored_discrete_deterministic,
+    ego_factored_discrete_sample,
     ego_sample_actions,
 )
 from spatial_competition_jax.marl.training_wrapper import TrainingWrapper
@@ -175,7 +177,7 @@ def evaluate_policy(
 # ---------------------------------------------------------------------------
 
 
-@functools.partial(jax.jit, static_argnums=(0, 1, 4, 5, 6))
+@functools.partial(jax.jit, static_argnums=(0, 1, 4, 5, 6, 7))
 def _eval_ego_episodes_jit(
     network: EgoActorCritic | EgoDiscreteActorCritic,
     wrapper: TrainingWrapper,
@@ -184,6 +186,7 @@ def _eval_ego_episodes_jit(
     deterministic: bool,
     use_temp: bool,
     is_discrete: bool,
+    is_factored: bool,
     temperature: jnp.ndarray,
 ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """Egocentric evaluation: run episodes with per-agent observations."""
@@ -200,7 +203,12 @@ def _eval_ego_episodes_jit(
             env_state, obs_all, sk = carry
             sk, action_key = jax.random.split(sk)
 
-            if is_discrete:
+            if is_discrete and is_factored:
+                if deterministic:
+                    actions, _ = ego_factored_discrete_deterministic(network, params, obs_all)  # type: ignore[arg-type]
+                else:
+                    actions, _, _ = ego_factored_discrete_sample(network, params, obs_all, action_key)  # type: ignore[arg-type]
+            elif is_discrete:
                 if deterministic:
                     actions, _ = ego_discrete_deterministic(network, params, obs_all)  # type: ignore[arg-type]
                 else:
@@ -249,8 +257,9 @@ def evaluate_ego_policy(
     key: jnp.ndarray | None = None,
     temperature: float | None = None,
     is_discrete: bool = False,
+    is_factored: bool = False,
 ) -> dict[str, float]:
-    """Evaluate a trained egocentric policy (continuous or discrete)."""
+    """Evaluate a trained egocentric policy (continuous, discrete, or factored discrete)."""
     if key is None:
         key = jax.random.PRNGKey(0)
 
@@ -259,7 +268,7 @@ def evaluate_ego_policy(
     keys = jax.random.split(key, num_episodes)
 
     total_rewards, all_positions, all_prices = _eval_ego_episodes_jit(
-        network, wrapper, params, keys, deterministic, use_temp, is_discrete, temp_arr,
+        network, wrapper, params, keys, deterministic, use_temp, is_discrete, is_factored, temp_arr,
     )
 
     episode_rewards = total_rewards.sum(axis=-1)

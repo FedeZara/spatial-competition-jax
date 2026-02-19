@@ -24,6 +24,7 @@ from spatial_competition_jax.marl.mappo.networks import (
     DiscreteActorCritic,
     EgoActorCritic,
     EgoDiscreteActorCritic,
+    EgoFactoredDiscreteActorCritic,
     SharedActorCritic,
     _categorical_entropy,
     _categorical_log_prob,
@@ -319,4 +320,114 @@ class EgoDiscretePolicy:
 
     def value(self, params: Any, states: jnp.ndarray) -> jnp.ndarray:
         _, v_sym = self._forward(params, states)
+        return symexp(v_sym)
+
+
+# ---------------------------------------------------------------------------
+# Egocentric: Factored Discrete (separate Location + Price categoricals)
+# ---------------------------------------------------------------------------
+
+
+class EgoFactoredDiscretePolicy:
+    """Egocentric adapter for :class:`EgoFactoredDiscreteActorCritic`.
+
+    Samples location and price **independently** from two Categoricals.
+    Each dimension has its own entropy term so the PPO entropy bonus
+    keeps location exploration alive even after prices converge.
+
+    The joint action index ``loc * num_price_bins + price`` is passed to
+    the environment exactly like :class:`EgoDiscretePolicy`.
+    """
+
+    per_agent_obs = True
+
+    def __init__(
+        self, network: EgoFactoredDiscreteActorCritic, num_agents: int,
+    ) -> None:
+        self.network = network
+        self.num_agents = num_agents
+        self.num_actions = network.num_actions
+        self._n_loc = network.num_location_bins
+        self._n_price = network.num_price_bins
+
+    def init(self, key: jnp.ndarray, dummy: jnp.ndarray) -> Any:
+        return self.network.init(key, dummy)
+
+    def _forward(
+        self, params: Any, states: jnp.ndarray,
+    ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+        """Return ``(loc_logits, price_logits, value_symlog)``."""
+        if states.ndim == 3:
+            E, A = states.shape[0], states.shape[1]
+            flat = states.reshape(E * A, -1)
+            loc_l, price_l, v_sym = self.network.apply(params, flat)  # type: ignore[misc]
+            return (
+                loc_l.reshape(E, A, -1),
+                price_l.reshape(E, A, -1),
+                v_sym.reshape(E, A),
+            )
+        return self.network.apply(params, states)  # type: ignore[misc]
+
+    # -- sampling ----------------------------------------------------------
+
+    def sample(
+        self, params: Any, states: jnp.ndarray, key: jnp.ndarray,
+    ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+        loc_logits, price_logits, v_sym = self._forward(params, states)
+        values = symexp(v_sym)
+
+        k_l, k_p = jax.random.split(key)
+
+        # Sample independently
+        E, A, _ = loc_logits.shape
+        loc_idx = jax.random.categorical(
+            k_l, loc_logits.reshape(E * A, -1),
+        ).reshape(E, A)
+        price_idx = jax.random.categorical(
+            k_p, price_logits.reshape(E * A, -1),
+        ).reshape(E, A)
+
+        joint_idx = loc_idx * self._n_price + price_idx
+        lp = (
+            _categorical_log_prob(loc_logits, loc_idx)
+            + _categorical_log_prob(price_logits, price_idx)
+        )
+        return joint_idx[..., None].astype(jnp.float32), lp, values
+
+    # -- evaluate (PPO update) ---------------------------------------------
+
+    def evaluate(
+        self, params: Any, states: jnp.ndarray, actions: jnp.ndarray,
+    ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+        loc_logits, price_logits, values = self._forward(params, states)
+
+        joint = actions[..., 0].astype(jnp.int32)
+        loc_idx = joint // self._n_price
+        price_idx = joint % self._n_price
+
+        lp = (
+            _categorical_log_prob(loc_logits, loc_idx)
+            + _categorical_log_prob(price_logits, price_idx)
+        )
+        entropy = (
+            _categorical_entropy(loc_logits)
+            + _categorical_entropy(price_logits)
+        )
+        return lp, entropy, values
+
+    # -- deterministic -----------------------------------------------------
+
+    def deterministic(
+        self, params: Any, states: jnp.ndarray,
+    ) -> tuple[jnp.ndarray, jnp.ndarray]:
+        loc_logits, price_logits, v_sym = self._forward(params, states)
+        loc_idx = jnp.argmax(loc_logits, axis=-1)
+        price_idx = jnp.argmax(price_logits, axis=-1)
+        joint_idx = loc_idx * self._n_price + price_idx
+        return joint_idx[..., None].astype(jnp.float32), symexp(v_sym)
+
+    # -- value only --------------------------------------------------------
+
+    def value(self, params: Any, states: jnp.ndarray) -> jnp.ndarray:
+        _, _, v_sym = self._forward(params, states)
         return symexp(v_sym)

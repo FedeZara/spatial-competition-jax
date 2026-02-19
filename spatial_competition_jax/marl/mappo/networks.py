@@ -697,6 +697,99 @@ def _categorical_entropy(logits: jnp.ndarray) -> jnp.ndarray:
     return -(probs * log_probs).sum(axis=-1)
 
 
+# ---------------------------------------------------------------------------
+# Factored Discrete Actor-Critic (separate Location + Price categoricals)
+# ---------------------------------------------------------------------------
+
+
+class EgoFactoredDiscreteActorCritic(nn.Module):
+    """Egocentric Actor-Critic with *factored* location + price categoricals.
+
+    Instead of a single Categorical over ``num_location_bins * num_price_bins``
+    joint actions, this network produces **two independent** sets of logits:
+
+    - ``loc_logits``   ``(..., num_location_bins)``
+    - ``price_logits`` ``(..., num_price_bins)``
+
+    Each dimension gets its own entropy bonus during PPO training, which
+    prevents the common failure mode where the policy concentrates on
+    centre locations while only exploring prices.
+
+    The downstream environment interface is unchanged — the policy adapter
+    recombines them into a joint index for ``map_discrete_actions``.
+    """
+
+    num_location_bins: int
+    num_price_bins: int
+    hidden_dims: Sequence[int] = (256, 256)
+    dtype: Dtype = jnp.bfloat16
+    param_dtype: Dtype = jnp.float32
+
+    @property
+    def num_actions(self) -> int:
+        """Total joint action count (for compatibility)."""
+        return self.num_location_bins * self.num_price_bins
+
+    @nn.compact
+    def __call__(
+        self, obs: jnp.ndarray,
+    ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+        """Forward pass.
+
+        Args:
+            obs: ``(..., obs_dim)`` — a single agent's observation.
+
+        Returns:
+            ``(loc_logits, price_logits, value)`` with shapes:
+            - loc_logits:   ``(..., num_location_bins)``
+            - price_logits: ``(..., num_price_bins)``
+            - value:        ``(...,)``
+        """
+        x = obs.astype(self.dtype)
+
+        for i, dim in enumerate(self.hidden_dims):
+            x = nn.Dense(
+                dim,
+                dtype=self.dtype,
+                param_dtype=self.param_dtype,
+                kernel_init=orthogonal(jnp.sqrt(2)),
+                name=f"backbone_{i}",
+            )(x)
+            x = nn.relu(x)
+
+        features = x
+
+        loc_logits = nn.Dense(
+            self.num_location_bins,
+            dtype=self.dtype,
+            param_dtype=self.param_dtype,
+            kernel_init=orthogonal(0.01),
+            name="loc_logits",
+        )(features)
+
+        price_logits = nn.Dense(
+            self.num_price_bins,
+            dtype=self.dtype,
+            param_dtype=self.param_dtype,
+            kernel_init=orthogonal(0.01),
+            name="price_logits",
+        )(features)
+
+        value = nn.Dense(
+            1,
+            dtype=self.dtype,
+            param_dtype=self.param_dtype,
+            kernel_init=orthogonal(1.0),
+            name="critic",
+        )(features).squeeze(-1)
+
+        return (
+            loc_logits.astype(jnp.float32),
+            price_logits.astype(jnp.float32),
+            value.astype(jnp.float32),
+        )
+
+
 def ego_discrete_sample(
     network: EgoDiscreteActorCritic,
     params: dict,
@@ -743,3 +836,210 @@ def ego_discrete_deterministic(
     actions = indices[..., None].astype(jnp.float32)
 
     return actions, values
+
+
+# ---------------------------------------------------------------------------
+# Factored discrete sampling helpers
+# ---------------------------------------------------------------------------
+
+
+def ego_factored_discrete_sample(
+    network: EgoFactoredDiscreteActorCritic,
+    params: dict,
+    obs: jnp.ndarray,
+    key: jnp.ndarray,
+) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+    """Sample factored discrete actions (location + price independently).
+
+    Returns:
+        ``(actions, log_probs, values)`` with shapes
+        ``(..., 1)``, ``(...,)``, ``(...,)``.
+        Actions are float32 joint indices ``loc * num_price_bins + price``.
+    """
+    loc_logits, price_logits, v_sym = network.apply(params, obs)  # type: ignore[misc]
+    values = symexp(v_sym)
+
+    k_l, k_p = jax.random.split(key)
+
+    flat_loc = loc_logits.reshape(-1, network.num_location_bins)
+    loc_idx = jax.random.categorical(k_l, flat_loc).reshape(loc_logits.shape[:-1])
+
+    flat_price = price_logits.reshape(-1, network.num_price_bins)
+    price_idx = jax.random.categorical(k_p, flat_price).reshape(price_logits.shape[:-1])
+
+    joint_idx = loc_idx * network.num_price_bins + price_idx
+    log_probs = (
+        _categorical_log_prob(loc_logits, loc_idx)
+        + _categorical_log_prob(price_logits, price_idx)
+    )
+
+    return joint_idx[..., None].astype(jnp.float32), log_probs, values
+
+
+def ego_factored_discrete_deterministic(
+    network: EgoFactoredDiscreteActorCritic,
+    params: dict,
+    obs: jnp.ndarray,
+) -> tuple[jnp.ndarray, jnp.ndarray]:
+    """Deterministic factored discrete actions (argmax per dimension).
+
+    Returns:
+        ``(actions, values)`` with shapes ``(..., 1)``, ``(...,)``.
+    """
+    loc_logits, price_logits, v_sym = network.apply(params, obs)  # type: ignore[misc]
+    values = symexp(v_sym)
+
+    loc_idx = jnp.argmax(loc_logits, axis=-1)
+    price_idx = jnp.argmax(price_logits, axis=-1)
+    joint_idx = loc_idx * network.num_price_bins + price_idx
+
+    return joint_idx[..., None].astype(jnp.float32), values
+
+
+# ---------------------------------------------------------------------------
+# Conv1D Factored Discrete Actor-Critic (1-D spatial)
+# ---------------------------------------------------------------------------
+
+
+class EgoConv1dFactoredDiscreteActorCritic(nn.Module):
+    """Conv1D-based Actor-Critic for 1-D spatial observations.
+
+    Designed for the ``obs_type="conv_bin"`` observation layout::
+
+        obs = [ grid_channels (C × R) , scalar_features (S) ]
+
+    Grid channels (4 × R by default):
+        0 – self position (binary one-hot)
+        1 – other sellers (count per bin)
+        2 – buyer presence (binary per bin)
+        3 – seller avg-price blob (Gaussian-smoothed)
+
+    Scalar features (appended after flatten):
+        own_position / R  (D floats)
+        own_price / max   (1 float)
+        (own_quality / max if applicable)
+
+    Architecture::
+
+        Grid (R, C) → Conv1D stack → Flatten
+                                       ↓
+                               Concat(scalars) → MLP → Factored heads
+
+    Output interface is identical to
+    :class:`EgoFactoredDiscreteActorCritic`: ``(loc_logits, price_logits,
+    value)`` all in float32, so the same :class:`EgoFactoredDiscretePolicy`
+    adapter works unchanged.
+    """
+
+    num_location_bins: int
+    num_price_bins: int
+    spatial_resolution: int
+    num_grid_channels: int = 4
+    num_scalar_features: int = 2  # D + 1 (position + price); set at construction
+    conv_features: Sequence[int] = (16,)
+    conv_kernel_size: int = 3
+    mlp_hidden_dims: Sequence[int] = (128, 128)
+    dtype: Dtype = jnp.bfloat16
+    param_dtype: Dtype = jnp.float32
+
+    @property
+    def num_actions(self) -> int:
+        """Total joint action count (for compatibility)."""
+        return self.num_location_bins * self.num_price_bins
+
+    @nn.compact
+    def __call__(
+        self, obs: jnp.ndarray,
+    ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+        """Forward pass.
+
+        Args:
+            obs: ``(..., obs_dim)`` where
+                 ``obs_dim = num_grid_channels * spatial_resolution
+                             + num_scalar_features``.
+
+        Returns:
+            ``(loc_logits, price_logits, value)`` with shapes:
+            - loc_logits:   ``(..., num_location_bins)``
+            - price_logits: ``(..., num_price_bins)``
+            - value:        ``(...,)``
+        """
+        R = self.spatial_resolution
+        C = self.num_grid_channels
+        grid_size = C * R
+
+        # ── Split grid and scalar parts ──────────────────────────────
+        grid_flat = obs[..., :grid_size]
+        scalars = obs[..., grid_size:]  # (..., S)
+
+        # ── Reshape grid: (..., C*R) → (..., R, C) ──────────────────
+        batch_shape = grid_flat.shape[:-1]
+        grid = grid_flat.reshape(*batch_shape, C, R)
+        grid = jnp.swapaxes(grid, -2, -1)  # (..., R, C)
+
+        x = grid.astype(self.dtype)
+
+        # ── Conv1D trunk ─────────────────────────────────────────────
+        for i, feats in enumerate(self.conv_features):
+            x = nn.Conv(
+                features=feats,
+                kernel_size=(self.conv_kernel_size,),
+                padding="SAME",
+                dtype=self.dtype,
+                param_dtype=self.param_dtype,
+                kernel_init=orthogonal(jnp.sqrt(2)),
+                name=f"conv_{i}",
+            )(x)
+            x = nn.relu(x)
+
+        # Flatten spatial: (..., R, feats) → (..., R * feats)
+        x = x.reshape(*batch_shape, -1)
+
+        # ── Concat with scalar features ──────────────────────────────
+        scalars_cast = scalars.astype(self.dtype)
+        x = jnp.concatenate([x, scalars_cast], axis=-1)
+
+        # ── MLP trunk ────────────────────────────────────────────────
+        for i, dim in enumerate(self.mlp_hidden_dims):
+            x = nn.Dense(
+                dim,
+                dtype=self.dtype,
+                param_dtype=self.param_dtype,
+                kernel_init=orthogonal(jnp.sqrt(2)),
+                name=f"mlp_{i}",
+            )(x)
+            x = nn.relu(x)
+
+        features = x
+
+        # ── Factored action heads ────────────────────────────────────
+        loc_logits = nn.Dense(
+            self.num_location_bins,
+            dtype=self.dtype,
+            param_dtype=self.param_dtype,
+            kernel_init=orthogonal(0.01),
+            name="loc_logits",
+        )(features)
+
+        price_logits = nn.Dense(
+            self.num_price_bins,
+            dtype=self.dtype,
+            param_dtype=self.param_dtype,
+            kernel_init=orthogonal(0.01),
+            name="price_logits",
+        )(features)
+
+        # ── Critic head ──────────────────────────────────────────────
+        value = nn.Dense(
+            1,
+            dtype=self.dtype,
+            param_dtype=self.param_dtype,
+            kernel_init=orthogonal(1.0),
+            name="critic",
+        )(features).squeeze(-1)
+
+        return (
+            loc_logits.astype(jnp.float32),
+            price_logits.astype(jnp.float32),
+            value.astype(jnp.float32),
+        )

@@ -15,7 +15,9 @@ from spatial_competition_jax.marl.mappo.mappo import MAPPO, linear_anneal
 from spatial_competition_jax.marl.mappo.networks import (
     DiscreteActorCritic,
     EgoActorCritic,
+    EgoConv1dFactoredDiscreteActorCritic,
     EgoDiscreteActorCritic,
+    EgoFactoredDiscreteActorCritic,
     SharedActorCritic,
 )
 from spatial_competition_jax.marl.mappo.policy import (
@@ -23,6 +25,7 @@ from spatial_competition_jax.marl.mappo.policy import (
     DiscretePolicy,
     EgoContinuousPolicy,
     EgoDiscretePolicy,
+    EgoFactoredDiscretePolicy,
     PolicyAdapter,
 )
 from spatial_competition_jax.marl.training_wrapper import TrainingWrapper
@@ -61,15 +64,36 @@ def parse_args() -> argparse.Namespace:
 def build_policy(config: Config, wrapper: TrainingWrapper) -> PolicyAdapter:
     """Build the appropriate PolicyAdapter from config.
 
-    Handles all 4 combos: {global, egocentric} × {continuous, discrete}.
+    Handles all combos: {global, egocentric} × {continuous, discrete}
+    and the Conv1D variant when ``obs_type == "conv_bin"``.
     """
     hidden_dims = tuple(config.train.hidden_dims)
     ego = config.train.observation_mode == "egocentric"
     discrete = config.env.action_type == "discrete"
+    conv_bin = config.train.obs_type == "conv_bin"
+
+    if ego and discrete and conv_bin:
+        # Conv1D network for spatial grid observations
+        scalar_dim = wrapper.dimensions + 1
+        if wrapper.include_quality:
+            scalar_dim += 1
+        net = EgoConv1dFactoredDiscreteActorCritic(
+            num_location_bins=wrapper.num_location_bins,
+            num_price_bins=wrapper.num_price_bins,
+            spatial_resolution=wrapper.space_resolution,
+            num_grid_channels=wrapper._conv_grid_channels,
+            num_scalar_features=scalar_dim,
+            mlp_hidden_dims=hidden_dims,
+        )
+        return EgoFactoredDiscretePolicy(net, num_agents=wrapper.num_agents)
 
     if ego and discrete:
-        net = EgoDiscreteActorCritic(num_actions=wrapper.num_actions, hidden_dims=hidden_dims)
-        return EgoDiscretePolicy(net, num_agents=wrapper.num_agents)
+        net = EgoFactoredDiscreteActorCritic(
+            num_location_bins=wrapper.num_location_bins,
+            num_price_bins=wrapper.num_price_bins,
+            hidden_dims=hidden_dims,
+        )
+        return EgoFactoredDiscretePolicy(net, num_agents=wrapper.num_agents)
     if ego:
         net = EgoActorCritic(movement_dim=wrapper.movement_dim, bounded_dim=wrapper.bounded_dim, hidden_dims=hidden_dims)
         return EgoContinuousPolicy(net, num_agents=wrapper.num_agents)
@@ -165,6 +189,7 @@ def _train(
         action_type=config.env.action_type,
         num_location_bins=config.env.num_location_bins,
         num_price_bins=config.env.num_price_bins,
+        obs_type=config.train.obs_type,
     )
 
     # ── independent PPO: append agent IDs to ego obs ────────────────
@@ -317,6 +342,7 @@ def _train(
                         deterministic=config.train.deterministic_eval,
                         temperature=config.train.buyer_choice_temp_end if use_temp_anneal else None,
                         is_discrete=config.env.action_type == "discrete",
+                        is_factored=config.env.action_type == "discrete",
                     )
                 else:
                     eval_stats = evaluate_policy(
@@ -380,6 +406,7 @@ def _train(
             deterministic=True,
             temperature=config.train.buyer_choice_temp_end if use_temp_anneal else None,
             is_discrete=config.env.action_type == "discrete",
+            is_factored=config.env.action_type == "discrete",
         )
     else:
         final_eval = evaluate_policy(

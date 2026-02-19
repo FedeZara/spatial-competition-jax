@@ -1,0 +1,13 @@
+# 1D Hotelling with discrete actions + Conv1D observations
+#
+# Observation per agent (4 spatial channels × R + 2 scalars):
+#   Grid: self_position | other_sellers | buyers | avg_price_blob
+#   Scalars: own_position, own_price
+#
+# For R=10: obs_dim = 4×10 + 2 = 42
+# Conv1D(32,k=3)×2 → Flatten(320) → Concat(2) → MLP(128,128) → Heads
+
+_parent: hotelling_1d_discrete.yaml
+
+# Use Conv1D bin-based observations
+obs_type: conv_bin

@@ -15,6 +15,7 @@ from spatial_competition_jax.env import (
     SpatialCompetitionEnv,
     make_constant_sampler,
 )
+from spatial_competition_jax.observations import build_observations
 
 # ---------------------------------------------------------------------------
 # Gaussian blob helpers
@@ -97,6 +98,8 @@ class TrainingWrapper:
         action_type: str = "continuous",
         num_location_bins: int = 10,
         num_price_bins: int = 10,
+        # Observation type: "blob" or "bin"
+        obs_type: str = "blob",
     ) -> None:
         self.env = SpatialCompetitionEnv(
             num_sellers=num_sellers,
@@ -133,6 +136,9 @@ class TrainingWrapper:
         self.num_price_bins = num_price_bins
         self.num_actions = num_location_bins * num_price_bins  # joint categorical size
 
+        # Observation type
+        self.obs_type = obs_type
+
         # Observation / state dimensions
         self._per_agent_dim = dimensions + 1  # position + price
         if include_quality:
@@ -146,7 +152,34 @@ class TrainingWrapper:
         self._blob_dim = n_blob_channels * cells_per_channel
 
         self.state_dim = self._blob_dim + self._per_agent_dim * num_sellers
-        self.obs_dim = self.state_dim  # perfect information (updated by enable_agent_id)
+
+        if obs_type == "bin":
+            # Bin-based obs per agent:
+            #   own_position  (D floats, normalised)
+            #   own_price     (1 float, normalised by max_price)
+            #   [own_quality] (1 float, normalised by max_quality)
+            #   local_view    (3 * R^D floats: self, others, buyers)
+            bin_scalar_dim = dimensions + 1
+            if include_quality:
+                bin_scalar_dim += 1
+            bin_grid_dim = 3 * (space_resolution ** dimensions)
+            self.obs_dim = bin_scalar_dim + bin_grid_dim
+        elif obs_type == "conv_bin":
+            # Conv1D obs per agent:
+            #   Grid channels first (4 × R^D), then scalar features.
+            #     ch 0: self position   (from local_view)
+            #     ch 1: other sellers   (from local_view)
+            #     ch 2: buyer presence  (from local_view)
+            #     ch 3: seller avg-price blob (Gaussian-smoothed)
+            #   Scalars: own_position (D) + own_price (1) [+ own_quality (1)]
+            self._conv_grid_channels = 4
+            self._conv_scalar_dim = dimensions + 1
+            if include_quality:
+                self._conv_scalar_dim += 1
+            conv_grid_dim = self._conv_grid_channels * (space_resolution ** dimensions)
+            self.obs_dim = conv_grid_dim + self._conv_scalar_dim
+        else:
+            self.obs_dim = self.state_dim  # perfect information (updated by enable_agent_id)
 
         # Action dimensions (split by distribution family)
         self.movement_dim = dimensions  # Gaussian (tanh-squashed)
@@ -240,6 +273,160 @@ class TrainingWrapper:
 
     def extract_all_agent_obs(self, state: EnvState) -> jnp.ndarray:
         """Build egocentric observations for all agents.
+
+        Dispatches based on ``self.obs_type``:
+        - ``"blob"``:     Gaussian-blob spatial channels + ego scalars
+        - ``"bin"``:      Raw bin grids (local_view) + scalars
+        - ``"conv_bin"``: 4-channel grid (local_view + avg-price blob) + scalars
+
+        Returns:
+            Array of shape ``(A, obs_dim)``.
+        """
+        if self.obs_type == "bin":
+            return self._extract_bin_agent_obs(state)
+        if self.obs_type == "conv_bin":
+            return self._extract_conv_bin_agent_obs(state)
+        return self._extract_blob_agent_obs(state)
+
+    def _extract_bin_agent_obs(self, state: EnvState) -> jnp.ndarray:
+        """Build per-agent observations from the env's bin-based grids.
+
+        Layout (per agent)::
+
+            [ own_pos/R  (D),
+              own_price/max  (1),
+              (own_quality/max  (1),)
+              local_view  (3 × R^D) ]
+
+        ``local_view`` channels:
+            0 – self position (binary one-hot)
+            1 – other sellers count
+            2 – valid buyers (binary)
+
+        Returns:
+            Array of shape ``(A, obs_dim)``.
+        """
+        obs_dict = build_observations(self.env, state)
+
+        # own_position: (A, D) float, already normalised by R
+        own_pos = obs_dict["own_position"]
+        # own_price: (A,) → (A, 1), normalised by max_price
+        own_price = obs_dict["own_price"][:, None] / self.max_price
+
+        # local_view: (A, 3, R, …, R) uint8 → (A, 3*R^D) float32
+        local_view = obs_dict["local_view"].astype(jnp.float32)
+        lv_flat = local_view.reshape(self.num_agents, -1)
+
+        parts: list[jnp.ndarray] = [own_pos, own_price]
+
+        if self.include_quality:
+            own_quality = obs_dict["own_quality"][:, None] / self.max_quality
+            parts.append(own_quality)
+
+        parts.append(lv_flat)
+
+        obs = jnp.concatenate(parts, axis=-1)  # (A, obs_dim_base)
+
+        # Optional one-hot agent ID for independent PPO
+        if self._include_agent_id:
+            obs = jnp.concatenate([obs, self._agent_ids], axis=-1)
+
+        return obs
+
+    def _extract_conv_bin_agent_obs(self, state: EnvState) -> jnp.ndarray:
+        """Build per-agent observations for the Conv1D architecture.
+
+        All four spatial channels are Gaussian-smoothed blobs computed
+        directly from positions (no raw binary grids).
+
+        Flat layout::
+
+            [ grid_ch0 (R^D), grid_ch1 (R^D), grid_ch2 (R^D), grid_ch3 (R^D),
+              own_pos/R (D), own_price/max (1), (own_quality/max (1)) ]
+
+        Grid channels (all Gaussian-smoothed):
+            0 – self position blob
+            1 – other sellers blob
+            2 – buyer density blob
+            3 – seller avg-price blob
+
+        The Conv1D network reshapes the first ``4 × R^D`` values back
+        into ``(R^D, 4)`` for convolution.
+
+        Returns:
+            Array of shape ``(A, obs_dim)``.
+        """
+        positions = state.seller_positions.astype(jnp.float32) / self.space_resolution
+        norm_prices = state.seller_prices / self.max_price
+        cells = self.space_resolution ** self.dimensions
+        R = self.space_resolution
+        sigma = self.blob_sigma
+        D = self.dimensions
+
+        # ── Per-agent channels (vmap over agents) ────────────────────
+        def _per_agent_blobs(
+            agent_idx: jnp.ndarray,
+        ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+            # Ch 0: self position blob
+            self_pos = positions[agent_idx][None, :]  # (1, D)
+            self_blob = _gaussian_blob_channel(
+                self_pos, jnp.ones(1), R, sigma, D,
+            )
+
+            # Ch 1: other sellers blob
+            other_mask = (jnp.arange(self.num_agents) != agent_idx).astype(jnp.float32)
+            other_blob = _gaussian_blob_channel(
+                positions, other_mask, R, sigma, D,
+            )
+
+            # Ch 3: other sellers' avg-price blob
+            #   avg = Σ_j≠i G(x_j) * price_j  /  Σ_j≠i G(x_j)
+            other_price_weighted = _gaussian_blob_channel(
+                positions, other_mask * norm_prices, R, sigma, D,
+            )
+            other_avg_price = other_price_weighted / (other_blob + 1e-8)
+
+            return self_blob.ravel(), other_blob.ravel(), other_avg_price.ravel()
+
+        self_blobs, other_blobs, price_blobs = jax.vmap(_per_agent_blobs)(
+            jnp.arange(self.num_agents),
+        )  # each (A, R^D)
+
+        # ── Shared channel ───────────────────────────────────────────
+        # Ch 2: buyer density blob (normalised by new_buyers_per_step
+        #        so that the scale is ~0–1, matching other channels)
+        buyer_pos = state.buyer_positions.astype(jnp.float32) / self.space_resolution
+        buyer_blob = _gaussian_blob_channel(
+            buyer_pos,
+            state.buyer_valid.astype(jnp.float32),
+            R, sigma, D,
+        ).ravel()  # (R^D,)
+        buyer_blob = buyer_blob / jnp.maximum(self.env.new_buyers_per_step, 1.0)
+        buyer_ch = jnp.broadcast_to(buyer_blob[None, :], (self.num_agents, cells))
+
+        # ── Stack grid (A, 4, R^D) → flatten (A, 4*R^D) ─────────────
+        grid = jnp.stack([self_blobs, other_blobs, buyer_ch, price_blobs], axis=1)
+        grid_flat = grid.reshape(self.num_agents, -1)
+
+        # ── Scalar features ──────────────────────────────────────────
+        own_pos = positions  # (A, D), already normalised
+        own_price = norm_prices[:, None]  # (A, 1)
+
+        parts: list[jnp.ndarray] = [grid_flat, own_pos, own_price]
+
+        if self.include_quality:
+            own_quality = state.seller_qualities[:, None] / self.max_quality
+            parts.append(own_quality)
+
+        obs = jnp.concatenate(parts, axis=-1)  # (A, obs_dim_base)
+
+        if self._include_agent_id:
+            obs = jnp.concatenate([obs, self._agent_ids], axis=-1)
+
+        return obs
+
+    def _extract_blob_agent_obs(self, state: EnvState) -> jnp.ndarray:
+        """Build egocentric observations using Gaussian blob encoding.
 
         Each agent's observation has the same dimension but with its
         own features placed first in the per-agent section.

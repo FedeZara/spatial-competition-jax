@@ -1,0 +1,9 @@
+# PSRO configuration for 1D Hotelling with Conv1D observations
+#
+# Uses 4-channel spatial grid (local_view + avg-price blob)
+# processed by Conv1D before MLP heads.
+
+_parent: psro_hotelling_1d_discrete.yaml
+
+# Use Conv1D bin-based observations
+obs_type: conv_bin

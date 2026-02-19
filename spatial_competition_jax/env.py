@@ -334,8 +334,11 @@ class SpatialCompetitionEnv:
             - seller_prices[None, :]
         )
 
-        # Small noise for random tie-breaking (used by hard path)
-        noise = jax.random.uniform(key, utility.shape, dtype=jnp.float32) * 1e-6
+        # Small noise for random tie-breaking (used by hard path).
+        # Must be large enough to survive float32 rounding when added to
+        # utility (≈1–10), but small enough not to override real
+        # differences (smallest meaningful Δutility ≈ 0.002).
+        noise = jax.random.uniform(key, utility.shape, dtype=jnp.float32) * 1e-4
         utility = utility + noise
 
         # Mask out invalid buyers

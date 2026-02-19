@@ -24,9 +24,20 @@ import numpy as np
 
 from spatial_competition_jax.marl.config import Config
 from spatial_competition_jax.marl.mappo.networks import (
+    DiscreteActorCritic,
+    EgoActorCritic,
+    EgoConv1dFactoredDiscreteActorCritic,
+    EgoDiscreteActorCritic,
+    EgoFactoredDiscreteActorCritic,
     SharedActorCritic,
-    deterministic_actions,
-    sample_actions,
+)
+from spatial_competition_jax.marl.mappo.policy import (
+    ContinuousPolicy,
+    DiscretePolicy,
+    EgoContinuousPolicy,
+    EgoDiscretePolicy,
+    EgoFactoredDiscretePolicy,
+    PolicyAdapter,
 )
 from spatial_competition_jax.marl.training_wrapper import TrainingWrapper
 from spatial_competition_jax.marl.utils.checkpoints import load_checkpoint
@@ -80,6 +91,96 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def build_wrapper(config: Config) -> TrainingWrapper:
+    """Build a TrainingWrapper from config."""
+    return TrainingWrapper(
+        num_sellers=config.env.num_sellers,
+        max_buyers=config.env.max_buyers,
+        dimensions=config.env.dimensions,
+        space_resolution=config.env.space_resolution,
+        max_price=config.env.max_price,
+        max_quality=config.env.max_quality,
+        max_step_size=config.env.max_step_size,
+        production_cost_factor=config.env.production_cost_factor,
+        movement_cost=config.env.movement_cost,
+        transport_cost=config.env.transport_cost,
+        transportation_cost_norm=config.env.transportation_cost_norm,
+        transport_cost_exponent=config.env.transport_cost_exponent,
+        quality_taste=config.env.quality_taste,
+        include_quality=config.env.include_quality,
+        new_buyers_per_step=config.env.new_buyers_per_step,
+        max_env_steps=config.env.max_env_steps,
+        buyer_choice_temperature=config.env.buyer_choice_temperature,
+        blob_sigma=config.train.blob_sigma,
+        action_type=config.env.action_type,
+        num_location_bins=config.env.num_location_bins,
+        num_price_bins=config.env.num_price_bins,
+        obs_type=config.train.obs_type,
+    )
+
+
+def build_policy(config: Config, wrapper: TrainingWrapper) -> PolicyAdapter:
+    """Build the appropriate PolicyAdapter from config.
+
+    Handles all combos: {global, egocentric} × {continuous, discrete}
+    and the Conv1D variant when ``obs_type == "conv_bin"``.
+    """
+    from typing import Any
+
+    hidden_dims = tuple(config.train.hidden_dims)
+    ego = config.train.observation_mode == "egocentric"
+    discrete = config.env.action_type == "discrete"
+    conv_bin = config.train.obs_type == "conv_bin"
+
+    net: Any  # Flax module — concrete type varies by branch
+
+    if ego and discrete and conv_bin:
+        scalar_dim = wrapper.dimensions + 1
+        if wrapper.include_quality:
+            scalar_dim += 1
+        net = EgoConv1dFactoredDiscreteActorCritic(
+            num_location_bins=wrapper.num_location_bins,
+            num_price_bins=wrapper.num_price_bins,
+            spatial_resolution=wrapper.space_resolution,
+            num_grid_channels=wrapper._conv_grid_channels,
+            num_scalar_features=scalar_dim,
+            mlp_hidden_dims=hidden_dims,
+        )
+        return EgoFactoredDiscretePolicy(net, num_agents=wrapper.num_agents)
+
+    if ego and discrete:
+        net = EgoFactoredDiscreteActorCritic(
+            num_location_bins=wrapper.num_location_bins,
+            num_price_bins=wrapper.num_price_bins,
+            hidden_dims=hidden_dims,
+        )
+        return EgoFactoredDiscretePolicy(net, num_agents=wrapper.num_agents)
+
+    if ego:
+        net = EgoActorCritic(
+            movement_dim=wrapper.movement_dim,
+            bounded_dim=wrapper.bounded_dim,
+            hidden_dims=hidden_dims,
+        )
+        return EgoContinuousPolicy(net, num_agents=wrapper.num_agents)
+
+    if discrete:
+        net = DiscreteActorCritic(
+            num_actions=wrapper.num_actions,
+            num_agents=wrapper.num_agents,
+            hidden_dims=hidden_dims,
+        )
+        return DiscretePolicy(net)
+
+    net = SharedActorCritic(
+        movement_dim=wrapper.movement_dim,
+        bounded_dim=wrapper.bounded_dim,
+        num_agents=wrapper.num_agents,
+        hidden_dims=hidden_dims,
+    )
+    return ContinuousPolicy(net)
+
+
 def main() -> None:
     """Run the visual simulation."""
     args = parse_args()
@@ -106,36 +207,16 @@ def main() -> None:
         print(f"Config not found: {config_path}, using defaults")
         config = Config()
 
-    with jax.default_device(device):
-        # ── wrapper ────────────────────────────────────────────────────
-        wrapper = TrainingWrapper(
-            num_sellers=config.env.num_sellers,
-            max_buyers=config.env.max_buyers,
-            dimensions=config.env.dimensions,
-            space_resolution=config.env.space_resolution,
-            max_price=config.env.max_price,
-            max_quality=config.env.max_quality,
-            max_step_size=config.env.max_step_size,
-            production_cost_factor=config.env.production_cost_factor,
-            movement_cost=config.env.movement_cost,
-            transport_cost=config.env.transport_cost,
-            transportation_cost_norm=config.env.transportation_cost_norm,
-            transport_cost_exponent=config.env.transport_cost_exponent,
-            quality_taste=config.env.quality_taste,
-            include_quality=config.env.include_quality,
-            new_buyers_per_step=config.env.new_buyers_per_step,
-            max_env_steps=config.env.max_env_steps,
-            buyer_choice_temperature=config.env.buyer_choice_temperature,
-            blob_sigma=config.train.blob_sigma,
-        )
+    use_ego = config.train.observation_mode == "egocentric"
 
-        # ── network ───────────────────────────────────────────────────
-        network = SharedActorCritic(
-            movement_dim=wrapper.movement_dim,
-            bounded_dim=wrapper.bounded_dim,
-            num_agents=wrapper.num_agents,
-            hidden_dims=tuple(config.train.hidden_dims),
-        )
+    with jax.default_device(device):
+        # ── wrapper & policy ──────────────────────────────────────────
+        wrapper = build_wrapper(config)
+
+        if config.train.independent and use_ego:
+            wrapper.enable_agent_id()
+
+        policy = build_policy(config, wrapper)
         params = jax.device_put(checkpoint["params"], device)
 
         # ── renderer ──────────────────────────────────────────────────
@@ -155,6 +236,8 @@ def main() -> None:
         running = True
 
         print(f"\nDeterministic: {deterministic}")
+        print(f"Observation:   {'egocentric' if use_ego else 'global'}")
+        print(f"Action type:   {config.env.action_type}")
         print(f"Episodes:      {args.num_episodes}")
         print(f"Max steps:     {max_steps}")
         print(f"Base delay:    {args.delay}s")
@@ -167,9 +250,16 @@ def main() -> None:
                 break
 
             key, reset_key = jax.random.split(key)
-            global_state, env_state = wrapper.reset(reset_key)
 
-            cumulative_rewards: dict[str, float] = {f"seller_{i}": 0.0 for i in range(wrapper.num_agents)}
+            # Reset env (ego vs global)
+            if use_ego:
+                obs, env_state = wrapper.reset_ego(reset_key)
+            else:
+                obs, env_state = wrapper.reset(reset_key)
+
+            cumulative_rewards: dict[str, float] = {
+                f"seller_{i}": 0.0 for i in range(wrapper.num_agents)
+            }
 
             print(f"\n▶ Episode {episode + 1}/{args.num_episodes}")
 
@@ -186,22 +276,36 @@ def main() -> None:
             for step in range(1, max_steps + 1):
                 key, action_key = jax.random.split(key)
 
-                state_batch = global_state[None, ...]  # add batch dim
+                if use_ego:
+                    # obs shape: (A, obs_dim) — add batch dim → (1, A, obs_dim)
+                    state_batch = obs[None, ...]
+                else:
+                    # obs shape: (state_dim,) — add batch dim → (1, state_dim)
+                    state_batch = obs[None, ...]
 
                 if deterministic:
-                    actions, _ = deterministic_actions(network, params, state_batch)
+                    actions, _ = policy.deterministic(params, state_batch)
                 else:
-                    actions, _, _ = sample_actions(network, params, state_batch, action_key)
+                    actions, _, _ = policy.sample(params, state_batch, action_key)
 
                 actions = actions[0]  # remove batch dim → (A, action_dim)
 
+                # Step env (ego vs global)
                 key, step_key = jax.random.split(key)
-                global_state, env_state, rewards, dones = wrapper.step(
-                    step_key,
-                    env_state,
-                    actions,
-                    temperature=eval_temperature,
-                )
+                if use_ego:
+                    obs, env_state, rewards, dones = wrapper.step_ego(
+                        step_key,
+                        env_state,
+                        actions,
+                        temperature=eval_temperature,
+                    )
+                else:
+                    obs, env_state, rewards, dones = wrapper.step(
+                        step_key,
+                        env_state,
+                        actions,
+                        temperature=eval_temperature,
+                    )
 
                 # Update cumulative rewards
                 rewards_np = np.asarray(rewards)

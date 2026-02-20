@@ -5,7 +5,6 @@ from spatial_competition_jax.env import (
     INFO_LIMITED,
     INFO_PRIVATE,
     TOPOLOGY_RECTANGLE,
-    TOPOLOGY_TORUS,
     EnvState,
     SpatialCompetitionEnv,
     make_constant_sampler,
@@ -24,7 +23,6 @@ __all__ = [
     "JaxMARLWrapper",
     # Constants
     "TOPOLOGY_RECTANGLE",
-    "TOPOLOGY_TORUS",
     "INFO_PRIVATE",
     "INFO_LIMITED",
     "INFO_COMPLETE",

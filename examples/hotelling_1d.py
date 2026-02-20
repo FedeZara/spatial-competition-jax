@@ -16,7 +16,6 @@ import jax.numpy as jnp
 
 from spatial_competition_jax import (
     INFO_COMPLETE,
-    TOPOLOGY_RECTANGLE,
     SpatialCompetitionEnv,
     SpatialCompetitionRenderer,
 )
@@ -31,7 +30,6 @@ def main() -> None:
         space_resolution=100,
         max_price=10.0,
         max_step_size=0.05,
-        topology=TOPOLOGY_RECTANGLE,
         information_level=INFO_COMPLETE,
         include_quality=False,
         include_buyer_valuation=False,

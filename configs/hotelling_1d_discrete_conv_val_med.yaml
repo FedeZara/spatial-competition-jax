@@ -1,0 +1,4 @@
+_parent: hotelling_1d_discrete_conv.yaml
+
+include_buyer_valuation: true
+buyer_value: 8.0

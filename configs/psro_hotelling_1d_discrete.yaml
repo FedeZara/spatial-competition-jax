@@ -18,7 +18,7 @@ br_mix_alpha_anneal_frac: 0.7
 br_patience: 50
 br_early_stop_delta: 0.05
 log_interval: 100
-save_interval: 2
+save_interval: 25
 
 # Override training hypers for best-response oracle
 total_updates: 50000
@@ -30,7 +30,7 @@ rollout_length: 128
 # but BR early-stops at ~2K updates → entropy barely anneals.
 # Use much lower entropy for the BR:
 #   - BR needs to converge to a sharp best-response, not explore
-#   - 0.003 × ln(110) ≈ 0.014, comparable to policy-loss magnitude
+#   - 0.003 × ln(121) ≈ 0.014, comparable to policy-loss magnitude
 entropy_coef: 0.003
 entropy_coef_start: 0.005
 entropy_coef_end: 0.001

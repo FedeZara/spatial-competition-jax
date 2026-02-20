@@ -4,10 +4,12 @@
 #   Grid: self_position | other_sellers | buyers | avg_price_blob
 #   Scalars: own_position, own_price
 #
-# For R=10: obs_dim = 4×10 + 2 = 42
-# Conv1D(32,k=3)×2 → Flatten(320) → Concat(2) → MLP(128,128) → Heads
+# For R=10: obs_dim = 4×(10+1) + 2 = 46
+# Conv1D(32,k=3)×2 → Flatten → Concat(2) → MLP(128,128) → Heads
 
 _parent: hotelling_1d_discrete.yaml
 
 # Use Conv1D bin-based observations
 obs_type: conv_bin
+
+total_updates: 500000

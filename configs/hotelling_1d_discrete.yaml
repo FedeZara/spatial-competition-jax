@@ -1,4 +1,4 @@
-# 1D Hotelling with discrete actions (10 location bins × 10 price bins)
+# 1D Hotelling with discrete actions (11 location bins × 11 price bins)
 # Quadratic transport costs (d'Aspremont et al., 1979)
 
 # Environment
@@ -17,7 +17,7 @@ max_step_size: 1.0
 
 # Discrete action space
 action_type: discrete
-num_location_bins: 10
+num_location_bins: 11
 num_price_bins: 11
 observation_mode: egocentric
 independent: true

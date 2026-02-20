@@ -44,23 +44,18 @@ def _compute_buyer_distances(
     """Compute distances from every buyer to one seller.
 
     Args:
-        env: Environment instance (for topology / norm config).
+        env: Environment instance (for norm config).
         buyer_positions: (B, D) int32.
         seller_pos: (D,) int32.
 
     Returns:
-        (B,) float32 distances in space coordinates.
+        (B,) float32 distances in ``[0, 1]`` space.
     """
     buyer_space = buyer_positions.astype(jnp.float32) / env.space_resolution
     seller_space = seller_pos.astype(jnp.float32) / env.space_resolution
 
     diff = buyer_space - seller_space[None, :]  # (B, D)
-
-    if env.topology == 1:  # TORUS
-        abs_diff = jnp.abs(diff)
-        abs_diff = jnp.minimum(abs_diff, 1.0 - abs_diff)
-    else:  # RECTANGLE
-        abs_diff = jnp.abs(diff)
+    abs_diff = jnp.abs(diff)
 
     p = env.transportation_cost_norm
     if p == float("inf"):

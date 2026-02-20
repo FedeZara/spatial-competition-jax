@@ -26,6 +26,9 @@ class EnvConfig:
     transport_cost_exponent: float = 1.0
     quality_taste: float = 0.0
     include_quality: bool = False
+    include_buyer_valuation: bool = False
+    buyer_value: float | None = None  # None → env default (2 × max_price)
+    despawn_no_purchase: bool = False
     new_buyers_per_step: int = 50
     max_env_steps: int = 200
     space_resolution: int = 100
@@ -33,8 +36,8 @@ class EnvConfig:
 
     # Discrete action space (used when action_type="discrete")
     action_type: str = "continuous"  # "continuous" or "discrete"
-    num_location_bins: int = 10
-    num_price_bins: int = 10
+    num_location_bins: int = 11
+    num_price_bins: int = 11
 
 
 @dataclass

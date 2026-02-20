@@ -7,7 +7,6 @@ from spatial_competition_jax import (
     INFO_COMPLETE,
     INFO_LIMITED,
     INFO_PRIVATE,
-    TOPOLOGY_TORUS,
     JaxMARLWrapper,
     SpatialCompetitionEnv,
 )
@@ -59,7 +58,7 @@ class TestResetShapes:
         assert state.buyer_valid.shape == (50,)
         assert obs["own_position"].shape == (3, 2)
         assert obs["own_price"].shape == (3,)
-        assert obs["local_view"].shape == (3, 3, 20, 20)
+        assert obs["local_view"].shape == (3, 3, 21, 21)
 
     def test_complete_info_grids(self) -> None:
         env = _make_env(information_level=INFO_COMPLETE)
@@ -67,8 +66,8 @@ class TestResetShapes:
         assert "buyers" in obs
         assert "sellers_price" in obs
         assert "sellers_quality" in obs
-        assert obs["buyers"].shape == (3, 3, 20, 20)
-        assert obs["sellers_price"].shape == (3, 20, 20)
+        assert obs["buyers"].shape == (3, 3, 21, 21)
+        assert obs["sellers_price"].shape == (3, 21, 21)
 
     def test_limited_info_grids(self) -> None:
         env = _make_env(information_level=INFO_LIMITED)
@@ -96,13 +95,13 @@ class TestResetShapes:
         env = _make_env(dimensions=1)
         obs, state = env.reset(jax.random.PRNGKey(6))
         assert state.seller_positions.shape == (3, 1)
-        assert obs["local_view"].shape == (3, 3, 20)
+        assert obs["local_view"].shape == (3, 3, 21)
 
     def test_3d(self) -> None:
         env = _make_env(dimensions=3, space_resolution=5, max_buyers=10)
         obs, state = env.reset(jax.random.PRNGKey(7))
         assert state.seller_positions.shape == (3, 3)
-        assert obs["local_view"].shape == (3, 3, 5, 5, 5)
+        assert obs["local_view"].shape == (3, 3, 6, 6, 6)
 
 
 class TestStep:
@@ -148,17 +147,6 @@ class TestStep:
         key, k = jax.random.split(key)
         _, state, rewards, _, _ = env.step(k, state, actions)
         assert rewards.shape == (3,)
-
-    def test_torus_topology(self) -> None:
-        env = _make_env(topology=TOPOLOGY_TORUS)
-        key = jax.random.PRNGKey(40)
-        _, state = env.reset(key)
-        actions = _zero_actions(env)
-        key, k = jax.random.split(key)
-        _, state, _, _, _ = env.step(k, state, actions)
-        # Positions should be in [0, space_resolution)
-        assert jnp.all(state.seller_positions >= 0)
-        assert jnp.all(state.seller_positions < env.space_resolution)
 
     def test_softmax_buyer_choice(self) -> None:
         """With buyer_choice_temperature, sales should be fractional."""

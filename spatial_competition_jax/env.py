@@ -19,7 +19,6 @@ from spatial_competition_jax.observations import build_observations
 # ---------------------------------------------------------------------------
 
 TOPOLOGY_RECTANGLE = 0
-TOPOLOGY_TORUS = 1
 
 INFO_PRIVATE = 0
 INFO_LIMITED = 1
@@ -64,8 +63,8 @@ def uniform_position_sampler(
     dims: int,
     space_resolution: int,
 ) -> jnp.ndarray:
-    """Uniform position sampler over ``[0, space_resolution)``."""
-    return jax.random.randint(key, (dims,), 0, space_resolution)
+    """Uniform position sampler over ``[0, space_resolution]`` (R+1 grid points)."""
+    return jax.random.randint(key, (dims,), 0, space_resolution + 1)
 
 
 def make_constant_sampler(value: float) -> Callable:
@@ -113,8 +112,8 @@ def make_normal_position_sampler(mean: jnp.ndarray, std: float) -> Callable:
         space_resolution: int,
     ) -> jnp.ndarray:
         raw = mean + std * jax.random.normal(key, (dims,), dtype=jnp.float32)
-        raw = jnp.clip(raw, 0.0, 1.0 - 1.0 / space_resolution)
-        return (raw * space_resolution).astype(jnp.int32)
+        raw = jnp.clip(raw, 0.0, 1.0)
+        return jnp.round(raw * space_resolution).astype(jnp.int32)
 
     return sampler
 
@@ -148,13 +147,13 @@ class SpatialCompetitionEnv:
         movement_cost: float = 0.1,
         transportation_cost_norm: float = 2.0,
         transport_cost_exponent: float = 1.0,
-        topology: int = TOPOLOGY_RECTANGLE,
         information_level: int = INFO_COMPLETE,
         include_quality: bool = False,
         include_buyer_valuation: bool = False,
         new_buyers_per_step: int = 50,
         max_env_steps: int = 100,
         buyer_choice_temperature: float | None = None,
+        despawn_no_purchase: bool = False,
         # Optional custom samplers
         seller_position_sampler: Callable | None = None,
         seller_price_sampler: Callable | None = None,
@@ -176,18 +175,20 @@ class SpatialCompetitionEnv:
         self.movement_cost = movement_cost
         self.transportation_cost_norm = transportation_cost_norm
         self.transport_cost_exponent = transport_cost_exponent
-        self.topology = topology
         self.information_level = information_level
         self.include_quality = include_quality
         self.include_buyer_valuation = include_buyer_valuation
         self.new_buyers_per_step = new_buyers_per_step
         self.max_env_steps = max_env_steps
         self.buyer_choice_temperature = buyer_choice_temperature
+        self.despawn_no_purchase = despawn_no_purchase
 
         # ── precomputed grid metadata ──
-        self.grid_shape: tuple[int, ...] = tuple([space_resolution] * dimensions)
-        self.total_cells: int = space_resolution**dimensions
-        self.strides: tuple[int, ...] = tuple(space_resolution ** (dimensions - 1 - d) for d in range(dimensions))
+        # R cells → R+1 grid points per dimension
+        gp = space_resolution + 1  # number of grid points
+        self.grid_shape: tuple[int, ...] = tuple([gp] * dimensions)
+        self.total_cells: int = gp**dimensions
+        self.strides: tuple[int, ...] = tuple(gp ** (dimensions - 1 - d) for d in range(dimensions))
 
         # ── samplers (defaults if not provided) ──
         self.seller_position_sampler = seller_position_sampler or uniform_position_sampler
@@ -202,29 +203,24 @@ class SpatialCompetitionEnv:
     # Position helpers
     # ------------------------------------------------------------------
 
-    def _apply_topology(self, positions: jnp.ndarray) -> jnp.ndarray:
-        """Clamp / wrap positions according to the configured topology."""
-        if self.topology == TOPOLOGY_RECTANGLE:
-            return jnp.clip(positions, 0, self.space_resolution - 1)
-        else:  # TORUS
-            return positions % self.space_resolution
+    def _clip_positions(self, positions: jnp.ndarray) -> jnp.ndarray:
+        """Clamp positions to ``[0, space_resolution]``."""
+        return jnp.clip(positions, 0, self.space_resolution)
 
     def _compute_distances_pairwise(
         self,
         pos_a: jnp.ndarray,
         pos_b: jnp.ndarray,
     ) -> jnp.ndarray:
-        """Pairwise distances.  ``pos_a``: (A, D), ``pos_b``: (B, D) → (A, B)."""
+        """Pairwise distances.  ``pos_a``: (A, D), ``pos_b``: (B, D) → (A, B).
+
+        Positions are normalised to ``[0, 1]`` (pos 0 → 0, pos R → 1).
+        """
         a = pos_a.astype(jnp.float32) / self.space_resolution
         b = pos_b.astype(jnp.float32) / self.space_resolution
 
         diff = a[:, None, :] - b[None, :, :]  # (A, B, D)
-
-        if self.topology == TOPOLOGY_TORUS:
-            abs_diff = jnp.abs(diff)
-            abs_diff = jnp.minimum(abs_diff, 1.0 - abs_diff)
-        else:
-            abs_diff = jnp.abs(diff)
+        abs_diff = jnp.abs(diff)
 
         p = self.transportation_cost_norm
         if p == float("inf"):
@@ -412,7 +408,7 @@ class SpatialCompetitionEnv:
     ) -> EnvState:
         """Phase 3: Apply seller actions (movement, price, quality).
 
-        Updates seller positions (with topology), prices, qualities,
+        Updates seller positions (clamped to grid), prices, qualities,
         and records the movement norm for reward computation.
         """
         movement = actions["movement"]  # (S, D) float32
@@ -427,9 +423,9 @@ class SpatialCompetitionEnv:
         )
         last_movement = jnp.linalg.norm(movement, axis=-1)  # (S,)
 
-        # Convert to tensor coords & apply topology
+        # Convert to tensor coords & clamp
         move_tensor = jnp.round(movement * self.space_resolution).astype(jnp.int32)
-        new_positions = self._apply_topology(state.seller_positions + move_tensor)
+        new_positions = self._clip_positions(state.seller_positions + move_tensor)
 
         new_prices = jnp.clip(price, 0.0, self.max_price)
         if self.include_quality:
@@ -475,11 +471,18 @@ class SpatialCompetitionEnv:
         move_cost = self.movement_cost * state.seller_last_movement
         rewards = revenue - prod_cost - move_cost
 
+        # Despawn valid buyers who did not purchase this step
+        new_buyer_valid = state.buyer_valid
+        if self.despawn_no_purchase:
+            did_not_buy = state.buyer_valid & (bought_from < 0)
+            new_buyer_valid = state.buyer_valid & ~did_not_buy
+
         # Update state
         new_step = state.step + 1
         new_state = state.replace(  # type: ignore[attr-defined]
             seller_running_sales=running_sales,
             buyer_purchased_from=bought_from,
+            buyer_valid=new_buyer_valid,
             step=new_step,
         )
 

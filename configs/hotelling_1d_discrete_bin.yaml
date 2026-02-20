@@ -3,7 +3,7 @@
 # instead of Gaussian-blob encoding.
 #
 # Observation per agent:
-#   own_position (1) + own_price (1) + local_view (3×R) = 2 + 3×10 = 32
+#   own_position (1) + own_price (1) + local_view (3×(R+1)) = 2 + 3×11 = 35
 
 _parent: hotelling_1d_discrete.yaml
 

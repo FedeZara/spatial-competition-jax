@@ -41,8 +41,9 @@ def _gaussian_blob_channel(
     Returns:
         ``(map_size,)`` for 1-D or ``(map_size, map_size)`` for 2-D.
     """
-    # Convert sigma from grid-cell units to [0, 1] space
-    sigma_norm = sigma / map_size
+    # Convert sigma from grid-cell units to [0, 1] space.
+    # Grid has map_size points; spacing = 1/(map_size-1).
+    sigma_norm = sigma / max(map_size - 1, 1)
 
     coords = jnp.linspace(0.0, 1.0, map_size)  # (M,)
 
@@ -90,17 +91,25 @@ class TrainingWrapper:
         transport_cost_exponent: float = 1.0,
         quality_taste: float = 0.0,
         include_quality: bool = False,
+        include_buyer_valuation: bool = False,
+        buyer_value: float | None = None,
+        despawn_no_purchase: bool = False,
         new_buyers_per_step: int = 50,
         max_env_steps: int = 100,
         buyer_choice_temperature: float | None = None,
         blob_sigma: float = 1.5,
         # Discrete action space
         action_type: str = "continuous",
-        num_location_bins: int = 10,
-        num_price_bins: int = 10,
+        num_location_bins: int = 11,
+        num_price_bins: int = 11,
         # Observation type: "blob" or "bin"
         obs_type: str = "blob",
     ) -> None:
+        # Build optional buyer-value sampler (None → env default = 2 × max_price)
+        buyer_value_sampler = (
+            make_constant_sampler(buyer_value) if buyer_value is not None else None
+        )
+
         self.env = SpatialCompetitionEnv(
             num_sellers=num_sellers,
             max_buyers=max_buyers,
@@ -114,9 +123,12 @@ class TrainingWrapper:
             transportation_cost_norm=transportation_cost_norm,
             transport_cost_exponent=transport_cost_exponent,
             include_quality=include_quality,
+            include_buyer_valuation=include_buyer_valuation,
+            despawn_no_purchase=despawn_no_purchase,
             new_buyers_per_step=new_buyers_per_step,
             max_env_steps=max_env_steps,
             buyer_choice_temperature=buyer_choice_temperature,
+            buyer_value_sampler=buyer_value_sampler,
             buyer_distance_factor_sampler=make_constant_sampler(transport_cost),
             buyer_quality_taste_sampler=make_constant_sampler(quality_taste),
         )
@@ -140,6 +152,10 @@ class TrainingWrapper:
         self.obs_type = obs_type
 
         # Observation / state dimensions
+        # R cells → R+1 grid points per dimension
+        gp = space_resolution + 1  # number of grid points
+        self._num_grid_points = gp
+
         self._per_agent_dim = dimensions + 1  # position + price
         if include_quality:
             self._per_agent_dim += 1
@@ -148,7 +164,7 @@ class TrainingWrapper:
         n_blob_channels = 2  # presence, avg_price
         if include_quality:
             n_blob_channels += 1  # avg_quality
-        cells_per_channel = space_resolution**dimensions
+        cells_per_channel = gp**dimensions
         self._blob_dim = n_blob_channels * cells_per_channel
 
         self.state_dim = self._blob_dim + self._per_agent_dim * num_sellers
@@ -158,15 +174,15 @@ class TrainingWrapper:
             #   own_position  (D floats, normalised)
             #   own_price     (1 float, normalised by max_price)
             #   [own_quality] (1 float, normalised by max_quality)
-            #   local_view    (3 * R^D floats: self, others, buyers)
+            #   local_view    (3 * (R+1)^D floats: self, others, buyers)
             bin_scalar_dim = dimensions + 1
             if include_quality:
                 bin_scalar_dim += 1
-            bin_grid_dim = 3 * (space_resolution ** dimensions)
+            bin_grid_dim = 3 * (gp ** dimensions)
             self.obs_dim = bin_scalar_dim + bin_grid_dim
         elif obs_type == "conv_bin":
             # Conv1D obs per agent:
-            #   Grid channels first (4 × R^D), then scalar features.
+            #   Grid channels first (4 × (R+1)^D), then scalar features.
             #     ch 0: self position   (from local_view)
             #     ch 1: other sellers   (from local_view)
             #     ch 2: buyer presence  (from local_view)
@@ -176,7 +192,7 @@ class TrainingWrapper:
             self._conv_scalar_dim = dimensions + 1
             if include_quality:
                 self._conv_scalar_dim += 1
-            conv_grid_dim = self._conv_grid_channels * (space_resolution ** dimensions)
+            conv_grid_dim = self._conv_grid_channels * (gp ** dimensions)
             self.obs_dim = conv_grid_dim + self._conv_scalar_dim
         else:
             self.obs_dim = self.state_dim  # perfect information (updated by enable_agent_id)
@@ -230,17 +246,18 @@ class TrainingWrapper:
 
         # --- Gaussian blob spatial channels (sellers only) ---
         ones = jnp.ones(self.num_agents)
+        gp = self._num_grid_points
         presence = _gaussian_blob_channel(
             positions,
             ones,
-            self.space_resolution,
+            gp,
             self.blob_sigma,
             self.dimensions,
         )
         price_weighted = _gaussian_blob_channel(
             positions,
             norm_prices,
-            self.space_resolution,
+            gp,
             self.blob_sigma,
             self.dimensions,
         )
@@ -253,7 +270,7 @@ class TrainingWrapper:
             quality_weighted = _gaussian_blob_channel(
                 positions,
                 norm_qualities,
-                self.space_resolution,
+                gp,
                 self.blob_sigma,
                 self.dimensions,
             )
@@ -358,8 +375,8 @@ class TrainingWrapper:
         """
         positions = state.seller_positions.astype(jnp.float32) / self.space_resolution
         norm_prices = state.seller_prices / self.max_price
-        cells = self.space_resolution ** self.dimensions
-        R = self.space_resolution
+        gp = self._num_grid_points
+        cells = gp ** self.dimensions
         sigma = self.blob_sigma
         D = self.dimensions
 
@@ -370,19 +387,19 @@ class TrainingWrapper:
             # Ch 0: self position blob
             self_pos = positions[agent_idx][None, :]  # (1, D)
             self_blob = _gaussian_blob_channel(
-                self_pos, jnp.ones(1), R, sigma, D,
+                self_pos, jnp.ones(1), gp, sigma, D,
             )
 
             # Ch 1: other sellers blob
             other_mask = (jnp.arange(self.num_agents) != agent_idx).astype(jnp.float32)
             other_blob = _gaussian_blob_channel(
-                positions, other_mask, R, sigma, D,
+                positions, other_mask, gp, sigma, D,
             )
 
             # Ch 3: other sellers' avg-price blob
             #   avg = Σ_j≠i G(x_j) * price_j  /  Σ_j≠i G(x_j)
             other_price_weighted = _gaussian_blob_channel(
-                positions, other_mask * norm_prices, R, sigma, D,
+                positions, other_mask * norm_prices, gp, sigma, D,
             )
             other_avg_price = other_price_weighted / (other_blob + 1e-8)
 
@@ -399,8 +416,8 @@ class TrainingWrapper:
         buyer_blob = _gaussian_blob_channel(
             buyer_pos,
             state.buyer_valid.astype(jnp.float32),
-            R, sigma, D,
-        ).ravel()  # (R^D,)
+            gp, sigma, D,
+        ).ravel()  # ((R+1)^D,)
         buyer_blob = buyer_blob / jnp.maximum(self.env.new_buyers_per_step, 1.0)
         buyer_ch = jnp.broadcast_to(buyer_blob[None, :], (self.num_agents, cells))
 
@@ -446,11 +463,12 @@ class TrainingWrapper:
 
         # --- Gaussian blob spatial channels (sellers only) ---
         ones = jnp.ones(self.num_agents)
+        gp = self._num_grid_points
         presence = _gaussian_blob_channel(
-            positions, ones, self.space_resolution, self.blob_sigma, self.dimensions,
+            positions, ones, gp, self.blob_sigma, self.dimensions,
         )
         price_weighted = _gaussian_blob_channel(
-            positions, norm_prices, self.space_resolution, self.blob_sigma, self.dimensions,
+            positions, norm_prices, gp, self.blob_sigma, self.dimensions,
         )
         avg_price = price_weighted / (presence + 1e-8)
 
@@ -459,7 +477,7 @@ class TrainingWrapper:
         if self.include_quality:
             norm_qualities = state.seller_qualities / self.max_quality
             quality_weighted = _gaussian_blob_channel(
-                positions, norm_qualities, self.space_resolution, self.blob_sigma, self.dimensions,
+                positions, norm_qualities, gp, self.blob_sigma, self.dimensions,
             )
             avg_quality = quality_weighted / (presence + 1e-8)
             channels.append(avg_quality.ravel())
@@ -529,7 +547,7 @@ class TrainingWrapper:
         absolute position / price.
 
         Location bin *i* maps directly to grid position *i* (no
-        rounding to bin centre).  With ``num_location_bins == space_resolution``
+        rounding to bin centre).  With ``num_location_bins == space_resolution + 1``
         this gives exact 1-to-1 coverage.
 
         Movement is computed as the delta from the current position to
@@ -551,9 +569,9 @@ class TrainingWrapper:
         target_pos = (
             loc_bin.astype(jnp.float32)
             / jnp.maximum(n_loc - 1, 1)
-            * (self.space_resolution - 1)
+            * self.space_resolution
         ).astype(jnp.int32)
-        target_pos = jnp.clip(target_pos, 0, self.space_resolution - 1)
+        target_pos = jnp.clip(target_pos, 0, self.space_resolution)
 
         # Movement delta (in normalised [0, 1] coords)
         current_norm = seller_positions.astype(jnp.float32) / self.space_resolution
@@ -632,6 +650,12 @@ class TrainingWrapper:
             temperature=temperature,
         )
 
+        # Despawn valid buyers who did not purchase this step
+        new_buyer_valid = env_state.buyer_valid
+        if self.env.despawn_no_purchase:
+            did_not_buy = env_state.buyer_valid & (bought_from < 0)
+            new_buyer_valid = env_state.buyer_valid & ~did_not_buy
+
         # Rewards
         revenue = running_sales * env_state.seller_prices
         if self.env.include_quality:
@@ -645,6 +669,7 @@ class TrainingWrapper:
         new_env_state = env_state.replace(  # type: ignore[attr-defined]
             seller_running_sales=running_sales,
             buyer_purchased_from=bought_from,
+            buyer_valid=new_buyer_valid,
             step=new_step,
         )
 
@@ -748,6 +773,12 @@ class TrainingWrapper:
             temperature=temperature,
         )
 
+        # Despawn valid buyers who did not purchase this step
+        new_buyer_valid = env_state.buyer_valid
+        if self.env.despawn_no_purchase:
+            did_not_buy = env_state.buyer_valid & (bought_from < 0)
+            new_buyer_valid = env_state.buyer_valid & ~did_not_buy
+
         revenue = running_sales * env_state.seller_prices
         if self.env.include_quality:
             prod_cost = self.env.production_cost_factor * env_state.seller_qualities**2
@@ -760,6 +791,7 @@ class TrainingWrapper:
         new_env_state = env_state.replace(  # type: ignore[attr-defined]
             seller_running_sales=running_sales,
             buyer_purchased_from=bought_from,
+            buyer_valid=new_buyer_valid,
             step=new_step,
         )
 

@@ -39,6 +39,16 @@ class EnvConfig:
     num_location_bins: int = 11
     num_price_bins: int = 11
 
+    # Buyer position distribution
+    # "uniform" (default), "gaussian" (single), or "mixture"
+    buyer_distribution: str = "uniform"
+    # For "gaussian" / "mixture": list of [x, y] centres in [0, 1]^D
+    buyer_dist_means: list[list[float]] | None = None
+    # For "gaussian" / "mixture": per-component std dev
+    buyer_dist_stds: list[float] | None = None
+    # For "mixture": per-component weights (uniform if None)
+    buyer_dist_weights: list[float] | None = None
+
 
 @dataclass
 class TrainConfig:

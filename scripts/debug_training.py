@@ -116,6 +116,10 @@ def main():
         max_env_steps=config.env.max_env_steps,
         buyer_choice_temperature=config.env.buyer_choice_temperature,
         blob_sigma=config.train.blob_sigma,
+        buyer_distribution=config.env.buyer_distribution,
+        buyer_dist_means=config.env.buyer_dist_means,
+        buyer_dist_stds=config.env.buyer_dist_stds,
+        buyer_dist_weights=config.env.buyer_dist_weights,
     )
 
     print(f"\n{'─'*70}")

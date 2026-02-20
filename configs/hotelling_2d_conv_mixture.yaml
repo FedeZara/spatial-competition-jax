@@ -1,0 +1,15 @@
+# 2D Hotelling with Conv2D + Gaussian mixture buyer distribution
+#
+# Two buyer hotspots at opposite corners — creates asymmetric demand
+# that sellers must learn to partition.
+
+_parent: hotelling_2d_conv.yaml
+
+# Buyer distribution: two Gaussian clusters
+buyer_distribution: mixture
+buyer_dist_means:
+  - [0.25, 0.25]
+  - [0.75, 0.75]
+buyer_dist_stds:
+  - 0.12
+  - 0.12

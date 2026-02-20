@@ -1,0 +1,17 @@
+# 2D Hotelling with Conv2D + 3 sellers + Gaussian mixture buyers
+#
+# Three sellers competing for buyers concentrated at three hotspots
+# arranged in a triangle — tests whether agents specialise to
+# each cluster or compete for overlapping demand.
+
+_parent: hotelling_2d_conv_3sellers.yaml
+
+buyer_distribution: mixture
+buyer_dist_means:
+  - [0.25, 0.25]
+  - [0.75, 0.25]
+  - [0.50, 0.80]
+buyer_dist_stds:
+  - 0.10
+  - 0.10
+  - 0.10

@@ -1,0 +1,56 @@
+# 2D Hotelling with Conv2D observations + continuous actions
+#
+# Observation per agent (4 spatial channels × 51² + 3 scalars):
+#   Grid: self_blob | other_sellers_blob | buyer_density_blob | avg_price_blob
+#   Scalars: own_pos_x, own_pos_y, own_price
+#
+# Conv2D(32,k=5,s=2) → Conv2D(64,k=3,s=2) → Conv2D(128,k=3,s=2)
+#   → GlobalAvgPool → Concat(3 scalars) → MLP(256,256) → Heads
+#
+# Action: continuous movement vector (2D Gaussian) + price (Beta)
+
+_parent: default.yaml
+
+# ── Environment ────────────────────────────────────────────
+dimensions: 2
+num_sellers: 2
+space_resolution: 50
+max_price: 10.0
+include_quality: false
+movement_cost: 0.0
+transport_cost: 5.0
+transportation_cost_norm: 2.0
+new_buyers_per_step: 50
+max_env_steps: 200
+max_step_size: 0.1
+
+# Continuous action space (movement vector + price)
+action_type: continuous
+
+# No buyer choice temperature — hard argmax
+buyer_choice_temperature: null
+buyer_choice_temp_start: null
+
+# ── Observation ────────────────────────────────────────────
+obs_type: conv_bin
+observation_mode: egocentric
+independent: true
+target_kl: 0.1
+
+# ── Network ────────────────────────────────────────────────
+# MLP hidden dims (after Conv2D + GlobalAvgPool + scalar concat)
+hidden_dims: [256, 256]
+
+# ── Training ───────────────────────────────────────────────
+total_updates: 500000
+num_envs: 64
+rollout_length: 128
+
+# Keep exploration alive in larger state space
+entropy_coef: 0.02
+entropy_coef_start: 0.02
+entropy_coef_end: 0.005
+entropy_coef_anneal_frac: 0.9
+
+# PPO
+learning_rate: 0.0003

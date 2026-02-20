@@ -1,0 +1,10 @@
+# 2D Hotelling with Conv2D + 3 sellers (uniform buyers)
+#
+# Three-player spatial competition on a 2D grid.
+# Agents must learn to partition the plane into roughly equal regions.
+
+_parent: hotelling_2d_conv.yaml
+
+num_sellers: 3
+max_buyers: 300
+new_buyers_per_step: 75

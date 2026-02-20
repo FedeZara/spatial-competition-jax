@@ -14,6 +14,8 @@ from spatial_competition_jax.env import (
     EnvState,
     SpatialCompetitionEnv,
     make_constant_sampler,
+    make_mixture_position_sampler,
+    make_normal_position_sampler,
 )
 from spatial_competition_jax.observations import build_observations
 
@@ -104,11 +106,30 @@ class TrainingWrapper:
         num_price_bins: int = 11,
         # Observation type: "blob" or "bin"
         obs_type: str = "blob",
+        # Buyer distribution
+        buyer_distribution: str = "uniform",
+        buyer_dist_means: list[list[float]] | None = None,
+        buyer_dist_stds: list[float] | None = None,
+        buyer_dist_weights: list[float] | None = None,
     ) -> None:
         # Build optional buyer-value sampler (None → env default = 2 × max_price)
         buyer_value_sampler = (
             make_constant_sampler(buyer_value) if buyer_value is not None else None
         )
+
+        # Build buyer position sampler from distribution config
+        buyer_position_sampler = None  # None → env default (uniform)
+        if buyer_distribution == "gaussian" and buyer_dist_means is not None:
+            buyer_position_sampler = make_normal_position_sampler(
+                mean=jnp.array(buyer_dist_means[0], dtype=jnp.float32),
+                std=buyer_dist_stds[0] if buyer_dist_stds else 0.15,
+            )
+        elif buyer_distribution == "mixture" and buyer_dist_means is not None:
+            buyer_position_sampler = make_mixture_position_sampler(
+                means=buyer_dist_means,
+                stds=buyer_dist_stds or [0.15] * len(buyer_dist_means),
+                weights=buyer_dist_weights,
+            )
 
         self.env = SpatialCompetitionEnv(
             num_sellers=num_sellers,
@@ -129,6 +150,7 @@ class TrainingWrapper:
             max_env_steps=max_env_steps,
             buyer_choice_temperature=buyer_choice_temperature,
             buyer_value_sampler=buyer_value_sampler,
+            buyer_position_sampler=buyer_position_sampler,
             buyer_distance_factor_sampler=make_constant_sampler(transport_cost),
             buyer_quality_taste_sampler=make_constant_sampler(quality_taste),
         )

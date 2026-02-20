@@ -897,6 +897,190 @@ def ego_factored_discrete_deterministic(
 
 
 # ---------------------------------------------------------------------------
+# Conv2D Egocentric Actor-Critic (2-D spatial, continuous actions)
+# ---------------------------------------------------------------------------
+
+
+class EgoConv2dActorCritic(nn.Module):
+    """Conv2D-based Actor-Critic for 2-D spatial observations.
+
+    Designed for the ``obs_type="conv_bin"`` observation layout with
+    ``dimensions=2``::
+
+        obs = [ grid_channels (C × R²) , scalar_features (S) ]
+
+    Grid channels (4 × R² by default, Gaussian-smoothed blobs):
+        0 – self position blob
+        1 – other sellers blob
+        2 – buyer density blob (normalised)
+        3 – seller avg-price blob
+
+    Scalar features (appended after global average pooling):
+        own_position / R  (2 floats)
+        own_price / max   (1 float)
+        (own_quality / max if applicable)
+
+    Architecture::
+
+        Grid (R, R, C) → Conv2D(32,5,s2) → Conv2D(64,3,s2)
+                        → Conv2D(128,3,s2) → GlobalAvgPool
+                                                  ↓
+                                          Concat(scalars) → MLP → Heads
+
+    Output interface matches :class:`EgoActorCritic`::
+
+        (gauss_means, gauss_log_stds, beta_alphas, beta_betas, value)
+
+    so the existing :class:`EgoContinuousPolicy` adapter works unchanged.
+    """
+
+    movement_dim: int = 2
+    bounded_dim: int = 1
+    spatial_resolution: int = 51  # R = space_resolution + 1 (grid points)
+    num_grid_channels: int = 4
+    num_scalar_features: int = 3  # D + 1 (pos_x, pos_y, price)
+    conv_features: Sequence[int] = (32, 64, 128)
+    conv_kernel_sizes: Sequence[int] = (5, 3, 3)
+    conv_strides: Sequence[int] = (2, 2, 2)
+    mlp_hidden_dims: Sequence[int] = (256, 256)
+    dtype: Dtype = jnp.bfloat16
+    param_dtype: Dtype = jnp.float32
+    log_std_min: float = -5.0
+    log_std_max: float = 2.0
+
+    @property
+    def action_dim(self) -> int:
+        return self.movement_dim + self.bounded_dim
+
+    @nn.compact
+    def __call__(
+        self, obs: jnp.ndarray,
+    ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+        """Forward pass.
+
+        Args:
+            obs: ``(..., obs_dim)`` where
+                 ``obs_dim = num_grid_channels * spatial_resolution²
+                             + num_scalar_features``.
+
+        Returns:
+            ``(gauss_means, gauss_log_stds, beta_alphas, beta_betas, value)``
+            always float32, with shapes:
+            - gauss_means:    ``(..., movement_dim)``
+            - gauss_log_stds: ``(..., movement_dim)``
+            - beta_alphas:    ``(..., bounded_dim)``
+            - beta_betas:     ``(..., bounded_dim)``
+            - value:          ``(...,)``
+        """
+        R = self.spatial_resolution
+        C = self.num_grid_channels
+        grid_size = C * R * R
+
+        # ── Split grid and scalar parts ──────────────────────────────
+        grid_flat = obs[..., :grid_size]
+        scalars = obs[..., grid_size:]  # (..., S)
+
+        # ── Reshape grid: (..., C*R*R) → (..., R, R, C) ─────────────
+        batch_shape = grid_flat.shape[:-1]
+        grid = grid_flat.reshape(*batch_shape, C, R, R)
+        # (…, C, R, R) → (…, R, R, C)  (channels-last for nn.Conv)
+        grid = jnp.moveaxis(grid, -3, -1)
+
+        x = grid.astype(self.dtype)
+
+        # ── Conv2D trunk (strided) ───────────────────────────────────
+        for i, (feats, ks, stride) in enumerate(
+            zip(self.conv_features, self.conv_kernel_sizes, self.conv_strides),
+        ):
+            x = nn.Conv(
+                features=feats,
+                kernel_size=(ks, ks),
+                strides=(stride, stride),
+                padding="SAME",
+                dtype=self.dtype,
+                param_dtype=self.param_dtype,
+                kernel_init=orthogonal(jnp.sqrt(2)),
+                name=f"conv_{i}",
+            )(x)
+            x = nn.relu(x)
+
+        # ── Global Average Pooling ───────────────────────────────────
+        # (..., H, W, F) → (..., F)
+        x = x.mean(axis=(-3, -2))
+
+        # ── Concat with scalar features ──────────────────────────────
+        scalars_cast = scalars.astype(self.dtype)
+        x = jnp.concatenate([x, scalars_cast], axis=-1)
+
+        # ── MLP trunk ────────────────────────────────────────────────
+        for i, dim in enumerate(self.mlp_hidden_dims):
+            x = nn.Dense(
+                dim,
+                dtype=self.dtype,
+                param_dtype=self.param_dtype,
+                kernel_init=orthogonal(jnp.sqrt(2)),
+                name=f"mlp_{i}",
+            )(x)
+            x = nn.relu(x)
+
+        features = x
+
+        # ── Gaussian head (movement) ─────────────────────────────────
+        gauss_mean = nn.Dense(
+            self.movement_dim,
+            dtype=self.dtype,
+            param_dtype=self.param_dtype,
+            kernel_init=orthogonal(0.01),
+            name="gauss_mean",
+        )(features)
+        gauss_log_std = nn.Dense(
+            self.movement_dim,
+            dtype=self.dtype,
+            param_dtype=self.param_dtype,
+            kernel_init=orthogonal(0.01),
+            name="gauss_log_std",
+        )(features)
+        gauss_log_std = jnp.clip(gauss_log_std, self.log_std_min, self.log_std_max)
+
+        # ── Beta head (price, and optionally quality) ────────────────
+        beta_alpha_raw = nn.Dense(
+            self.bounded_dim,
+            dtype=self.dtype,
+            param_dtype=self.param_dtype,
+            kernel_init=orthogonal(0.01),
+            name="beta_alpha",
+        )(features)
+        beta_beta_raw = nn.Dense(
+            self.bounded_dim,
+            dtype=self.dtype,
+            param_dtype=self.param_dtype,
+            kernel_init=orthogonal(0.01),
+            name="beta_beta",
+        )(features)
+        beta_alpha_raw = jnp.clip(beta_alpha_raw, -20.0, 20.0)
+        beta_beta_raw = jnp.clip(beta_beta_raw, -20.0, 20.0)
+        beta_alpha = nn.softplus(beta_alpha_raw) + 1.0
+        beta_beta = nn.softplus(beta_beta_raw) + 1.0
+
+        # ── Critic head ──────────────────────────────────────────────
+        value = nn.Dense(
+            1,
+            dtype=self.dtype,
+            param_dtype=self.param_dtype,
+            kernel_init=orthogonal(1.0),
+            name="critic",
+        )(features).squeeze(-1)
+
+        return (
+            gauss_mean.astype(jnp.float32),
+            gauss_log_std.astype(jnp.float32),
+            beta_alpha.astype(jnp.float32),
+            beta_beta.astype(jnp.float32),
+            value.astype(jnp.float32),
+        )
+
+
+# ---------------------------------------------------------------------------
 # Conv1D Factored Discrete Actor-Critic (1-D spatial)
 # ---------------------------------------------------------------------------
 

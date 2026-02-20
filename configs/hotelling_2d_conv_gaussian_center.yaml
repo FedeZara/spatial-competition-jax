@@ -1,0 +1,13 @@
+# 2D Hotelling with Conv2D + single Gaussian buyer cluster at centre
+#
+# All demand is concentrated near the centre of the grid.
+# Tests whether sellers cluster at the demand peak (minimum
+# differentiation) or spread to reduce price competition.
+
+_parent: hotelling_2d_conv.yaml
+
+buyer_distribution: gaussian
+buyer_dist_means:
+  - [0.5, 0.5]
+buyer_dist_stds:
+  - 0.15

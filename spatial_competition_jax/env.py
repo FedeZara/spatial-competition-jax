@@ -118,6 +118,59 @@ def make_normal_position_sampler(mean: jnp.ndarray, std: float) -> Callable:
     return sampler
 
 
+def make_mixture_position_sampler(
+    means: list[list[float]],
+    stds: list[float],
+    weights: list[float] | None = None,
+) -> Callable:
+    """Return a position sampler from a mixture of Gaussians.
+
+    Each component is a D-dimensional Gaussian centred at a point in
+    ``[0, 1]^D``.  At each call, a component is chosen according to
+    *weights* (uniform if ``None``), and a position is sampled from
+    that component.
+
+    Args:
+        means: ``(K, D)`` — component centres in ``[0, 1]`` space.
+        stds: ``(K,)`` — per-component standard deviations.
+        weights: ``(K,)`` — mixture weights (will be normalised).
+            If ``None``, all components have equal weight.
+
+    Example::
+
+        # Two hotspots in 2-D at (0.25, 0.25) and (0.75, 0.75)
+        sampler = make_mixture_position_sampler(
+            means=[[0.25, 0.25], [0.75, 0.75]],
+            stds=[0.1, 0.1],
+        )
+    """
+    means_arr = jnp.array(means, dtype=jnp.float32)  # (K, D)
+    stds_arr = jnp.array(stds, dtype=jnp.float32)  # (K,)
+    K = means_arr.shape[0]
+    if weights is None:
+        w = jnp.ones(K, dtype=jnp.float32) / K
+    else:
+        w = jnp.array(weights, dtype=jnp.float32)
+        w = w / w.sum()
+    log_w = jnp.log(w)
+
+    def sampler(
+        key: jnp.ndarray,
+        dims: int,
+        space_resolution: int,
+    ) -> jnp.ndarray:
+        k_comp, k_pos = jax.random.split(key)
+        # Choose component
+        comp = jax.random.categorical(k_comp, log_w)
+        mu = means_arr[comp]  # (D,)
+        sigma = stds_arr[comp]  # scalar
+        raw = mu + sigma * jax.random.normal(k_pos, (dims,), dtype=jnp.float32)
+        raw = jnp.clip(raw, 0.0, 1.0)
+        return jnp.round(raw * space_resolution).astype(jnp.int32)
+
+    return sampler
+
+
 # ---------------------------------------------------------------------------
 # Environment
 # ---------------------------------------------------------------------------

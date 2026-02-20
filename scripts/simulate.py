@@ -27,6 +27,7 @@ from spatial_competition_jax.marl.mappo.networks import (
     DiscreteActorCritic,
     EgoActorCritic,
     EgoConv1dFactoredDiscreteActorCritic,
+    EgoConv2dActorCritic,
     EgoDiscreteActorCritic,
     EgoFactoredDiscreteActorCritic,
     SharedActorCritic,
@@ -119,6 +120,10 @@ def build_wrapper(config: Config) -> TrainingWrapper:
         num_location_bins=config.env.num_location_bins,
         num_price_bins=config.env.num_price_bins,
         obs_type=config.train.obs_type,
+        buyer_distribution=config.env.buyer_distribution,
+        buyer_dist_means=config.env.buyer_dist_means,
+        buyer_dist_stds=config.env.buyer_dist_stds,
+        buyer_dist_weights=config.env.buyer_dist_weights,
     )
 
 
@@ -150,6 +155,21 @@ def build_policy(config: Config, wrapper: TrainingWrapper) -> PolicyAdapter:
             mlp_hidden_dims=hidden_dims,
         )
         return EgoFactoredDiscretePolicy(net, num_agents=wrapper.num_agents)
+
+    if ego and not discrete and conv_bin:
+        gp = wrapper.space_resolution + 1
+        scalar_dim = wrapper.dimensions + 1
+        if wrapper.include_quality:
+            scalar_dim += 1
+        net = EgoConv2dActorCritic(
+            movement_dim=wrapper.movement_dim,
+            bounded_dim=wrapper.bounded_dim,
+            spatial_resolution=gp,
+            num_grid_channels=wrapper._conv_grid_channels,
+            num_scalar_features=scalar_dim,
+            mlp_hidden_dims=hidden_dims,
+        )
+        return EgoContinuousPolicy(net, num_agents=wrapper.num_agents)
 
     if ego and discrete:
         net = EgoFactoredDiscreteActorCritic(

@@ -1,0 +1,16 @@
+# PSRO wrapper for 2D Hotelling with Conv2D
+_parent: hotelling_2d_conv.yaml
+
+# ── PSRO-specific overrides ────────────────────────────────
+num_psro_iterations: 20
+num_br_updates: 100000
+num_eval_episodes: 50
+num_initial_policies: 1
+
+warmstart_br: true
+br_mix_alpha_start: 0.5
+br_mix_alpha_end: 0.1
+br_mix_alpha_anneal_frac: 0.7
+
+br_patience: 20
+br_early_stop_delta: 0.05

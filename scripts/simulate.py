@@ -140,6 +140,8 @@ def build_policy(config: Config, wrapper: TrainingWrapper) -> PolicyAdapter:
     discrete = config.env.action_type == "discrete"
     conv_bin = config.train.obs_type == "conv_bin"
 
+    ind_heads = config.train.independent_heads and config.train.independent
+
     net: Any  # Flax module — concrete type varies by branch
 
     if ego and discrete and conv_bin:
@@ -153,6 +155,8 @@ def build_policy(config: Config, wrapper: TrainingWrapper) -> PolicyAdapter:
             num_grid_channels=wrapper._conv_grid_channels,
             num_scalar_features=scalar_dim,
             mlp_hidden_dims=hidden_dims,
+            independent_heads=ind_heads,
+            num_agents=wrapper.num_agents,
         )
         return EgoFactoredDiscretePolicy(net, num_agents=wrapper.num_agents)
 
@@ -168,6 +172,8 @@ def build_policy(config: Config, wrapper: TrainingWrapper) -> PolicyAdapter:
             num_grid_channels=wrapper._conv_grid_channels,
             num_scalar_features=scalar_dim,
             mlp_hidden_dims=hidden_dims,
+            independent_heads=ind_heads,
+            num_agents=wrapper.num_agents,
         )
         return EgoContinuousPolicy(net, num_agents=wrapper.num_agents)
 

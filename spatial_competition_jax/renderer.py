@@ -677,8 +677,9 @@ class SpatialCompetitionRenderer:
         title = self._font.render("Top Sellers (by reward)", True, (180, 180, 180))
         self._screen.blit(title, (chart_x, chart_y - 20))
 
-        # Find max reward for scaling
-        max_reward = max(entry[1] for entry in top_sellers) if top_sellers else 1.0
+        # Find max reward for scaling (guard against NaN)
+        rewards_valid = [e[1] for e in top_sellers if not (np.isnan(e[1]) or np.isinf(e[1]))]
+        max_reward = max(rewards_valid) if rewards_valid else 1.0
         if max_reward <= 0:
             max_reward = 1.0
 
@@ -701,7 +702,8 @@ class SpatialCompetitionRenderer:
                 pygame.draw.rect(self._screen, (255, 255, 255), bg_rect, 2, border_radius=3)
 
             # Bar fill (proportional to reward)
-            bar_width = int((reward / max_reward) * (chart_width - 4)) if max_reward > 0 else 0
+            ratio = (reward / max_reward) if max_reward > 0 else 0.0
+            bar_width = int(ratio * (chart_width - 4)) if not (np.isnan(ratio) or np.isinf(ratio)) else 0
             if bar_width > 0:
                 bar_rect = pygame.Rect(chart_x + 2, row_y + 2, bar_width, bar_height - 4)
                 pygame.draw.rect(self._screen, color, bar_rect, border_radius=2)

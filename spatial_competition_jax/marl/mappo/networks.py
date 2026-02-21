@@ -927,6 +927,10 @@ class EgoConv2dActorCritic(nn.Module):
                                                   ↓
                                           Concat(scalars) → MLP → Heads
 
+    When ``independent_heads=True``, per-agent actor heads (Gaussian
+    movement + Beta price) are created and selected via the one-hot
+    agent ID.  The Conv + MLP backbone and critic remain shared.
+
     Output interface matches :class:`EgoActorCritic`::
 
         (gauss_means, gauss_log_stds, beta_alphas, beta_betas, value)
@@ -943,6 +947,8 @@ class EgoConv2dActorCritic(nn.Module):
     conv_kernel_sizes: Sequence[int] = (5, 3, 3)
     conv_strides: Sequence[int] = (2, 2, 2)
     mlp_hidden_dims: Sequence[int] = (256, 256)
+    independent_heads: bool = False
+    num_agents: int = 2  # only used when independent_heads=True
     dtype: Dtype = jnp.bfloat16
     param_dtype: Dtype = jnp.float32
     log_std_min: float = -5.0
@@ -961,7 +967,8 @@ class EgoConv2dActorCritic(nn.Module):
         Args:
             obs: ``(..., obs_dim)`` where
                  ``obs_dim = num_grid_channels * spatial_resolution²
-                             + num_scalar_features``.
+                             + num_scalar_features
+                             (+ num_agents if independent)``.
 
         Returns:
             ``(gauss_means, gauss_log_stds, beta_alphas, beta_betas, value)``
@@ -978,7 +985,7 @@ class EgoConv2dActorCritic(nn.Module):
 
         # ── Split grid and scalar parts ──────────────────────────────
         grid_flat = obs[..., :grid_size]
-        scalars = obs[..., grid_size:]  # (..., S)
+        scalars = obs[..., grid_size:]  # (..., S) or (..., S + A)
 
         # ── Reshape grid: (..., C*R*R) → (..., R, R, C) ─────────────
         batch_shape = grid_flat.shape[:-1]
@@ -1025,44 +1032,104 @@ class EgoConv2dActorCritic(nn.Module):
 
         features = x
 
-        # ── Gaussian head (movement) ─────────────────────────────────
-        gauss_mean = nn.Dense(
-            self.movement_dim,
-            dtype=self.dtype,
-            param_dtype=self.param_dtype,
-            kernel_init=orthogonal(0.01),
-            name="gauss_mean",
-        )(features)
-        gauss_log_std = nn.Dense(
-            self.movement_dim,
-            dtype=self.dtype,
-            param_dtype=self.param_dtype,
-            kernel_init=orthogonal(0.01),
-            name="gauss_log_std",
-        )(features)
-        gauss_log_std = jnp.clip(gauss_log_std, self.log_std_min, self.log_std_max)
+        if self.independent_heads:
+            A = self.num_agents
+            agent_id = obs[..., -A:].astype(self.dtype)  # (..., A)
 
-        # ── Beta head (price, and optionally quality) ────────────────
-        beta_alpha_raw = nn.Dense(
-            self.bounded_dim,
-            dtype=self.dtype,
-            param_dtype=self.param_dtype,
-            kernel_init=orthogonal(0.01),
-            name="beta_alpha",
-        )(features)
-        beta_beta_raw = nn.Dense(
-            self.bounded_dim,
-            dtype=self.dtype,
-            param_dtype=self.param_dtype,
-            kernel_init=orthogonal(0.01),
-            name="beta_beta",
-        )(features)
-        beta_alpha_raw = jnp.clip(beta_alpha_raw, -20.0, 20.0)
-        beta_beta_raw = jnp.clip(beta_beta_raw, -20.0, 20.0)
-        beta_alpha = nn.softplus(beta_alpha_raw) + 1.0
-        beta_beta = nn.softplus(beta_beta_raw) + 1.0
+            # ── Per-agent Gaussian heads (movement) ──────────────────
+            stacked_mean = jnp.stack([
+                nn.Dense(
+                    self.movement_dim,
+                    dtype=self.dtype,
+                    param_dtype=self.param_dtype,
+                    kernel_init=orthogonal(0.01),
+                    name=f"gauss_mean_{a}",
+                )(features)
+                for a in range(A)
+            ], axis=-2)  # (..., A, movement_dim)
+            gauss_mean = jnp.einsum("...a,...ab->...b", agent_id, stacked_mean)
 
-        # ── Critic head ──────────────────────────────────────────────
+            stacked_log_std = jnp.stack([
+                nn.Dense(
+                    self.movement_dim,
+                    dtype=self.dtype,
+                    param_dtype=self.param_dtype,
+                    kernel_init=orthogonal(0.01),
+                    name=f"gauss_log_std_{a}",
+                )(features)
+                for a in range(A)
+            ], axis=-2)
+            gauss_log_std = jnp.einsum("...a,...ab->...b", agent_id, stacked_log_std)
+            gauss_log_std = jnp.clip(gauss_log_std, self.log_std_min, self.log_std_max)
+
+            # ── Per-agent Beta heads (price) ─────────────────────────
+            stacked_alpha = jnp.stack([
+                nn.Dense(
+                    self.bounded_dim,
+                    dtype=self.dtype,
+                    param_dtype=self.param_dtype,
+                    kernel_init=orthogonal(0.01),
+                    name=f"beta_alpha_{a}",
+                )(features)
+                for a in range(A)
+            ], axis=-2)
+            beta_alpha_raw = jnp.einsum("...a,...ab->...b", agent_id, stacked_alpha)
+
+            stacked_beta = jnp.stack([
+                nn.Dense(
+                    self.bounded_dim,
+                    dtype=self.dtype,
+                    param_dtype=self.param_dtype,
+                    kernel_init=orthogonal(0.01),
+                    name=f"beta_beta_{a}",
+                )(features)
+                for a in range(A)
+            ], axis=-2)
+            beta_beta_raw = jnp.einsum("...a,...ab->...b", agent_id, stacked_beta)
+
+            beta_alpha_raw = jnp.clip(beta_alpha_raw, -20.0, 20.0)
+            beta_beta_raw = jnp.clip(beta_beta_raw, -20.0, 20.0)
+            beta_alpha = nn.softplus(beta_alpha_raw) + 1.0
+            beta_beta = nn.softplus(beta_beta_raw) + 1.0
+        else:
+            # ── Shared Gaussian head (movement) ──────────────────────
+            gauss_mean = nn.Dense(
+                self.movement_dim,
+                dtype=self.dtype,
+                param_dtype=self.param_dtype,
+                kernel_init=orthogonal(0.01),
+                name="gauss_mean",
+            )(features)
+            gauss_log_std = nn.Dense(
+                self.movement_dim,
+                dtype=self.dtype,
+                param_dtype=self.param_dtype,
+                kernel_init=orthogonal(0.01),
+                name="gauss_log_std",
+            )(features)
+            gauss_log_std = jnp.clip(gauss_log_std, self.log_std_min, self.log_std_max)
+
+            # ── Shared Beta head (price) ─────────────────────────────
+            beta_alpha_raw = nn.Dense(
+                self.bounded_dim,
+                dtype=self.dtype,
+                param_dtype=self.param_dtype,
+                kernel_init=orthogonal(0.01),
+                name="beta_alpha",
+            )(features)
+            beta_beta_raw = nn.Dense(
+                self.bounded_dim,
+                dtype=self.dtype,
+                param_dtype=self.param_dtype,
+                kernel_init=orthogonal(0.01),
+                name="beta_beta",
+            )(features)
+            beta_alpha_raw = jnp.clip(beta_alpha_raw, -20.0, 20.0)
+            beta_beta_raw = jnp.clip(beta_beta_raw, -20.0, 20.0)
+            beta_alpha = nn.softplus(beta_alpha_raw) + 1.0
+            beta_beta = nn.softplus(beta_beta_raw) + 1.0
+
+        # ── Critic head (always shared) ──────────────────────────────
         value = nn.Dense(
             1,
             dtype=self.dtype,
@@ -1109,6 +1176,10 @@ class EgoConv1dFactoredDiscreteActorCritic(nn.Module):
                                        ↓
                                Concat(scalars) → MLP → Factored heads
 
+    When ``independent_heads=True``, per-agent actor heads are created
+    and selected via the one-hot agent ID appended to the observation.
+    The Conv + MLP backbone and critic head remain shared.
+
     Output interface is identical to
     :class:`EgoFactoredDiscreteActorCritic`: ``(loc_logits, price_logits,
     value)`` all in float32, so the same :class:`EgoFactoredDiscretePolicy`
@@ -1123,6 +1194,8 @@ class EgoConv1dFactoredDiscreteActorCritic(nn.Module):
     conv_features: Sequence[int] = (16,)
     conv_kernel_size: int = 3
     mlp_hidden_dims: Sequence[int] = (128, 128)
+    independent_heads: bool = False
+    num_agents: int = 2  # only used when independent_heads=True
     dtype: Dtype = jnp.bfloat16
     param_dtype: Dtype = jnp.float32
 
@@ -1140,7 +1213,8 @@ class EgoConv1dFactoredDiscreteActorCritic(nn.Module):
         Args:
             obs: ``(..., obs_dim)`` where
                  ``obs_dim = num_grid_channels * spatial_resolution
-                             + num_scalar_features``.
+                             + num_scalar_features
+                             (+ num_agents if independent)``.
 
         Returns:
             ``(loc_logits, price_logits, value)`` with shapes:
@@ -1154,7 +1228,7 @@ class EgoConv1dFactoredDiscreteActorCritic(nn.Module):
 
         # ── Split grid and scalar parts ──────────────────────────────
         grid_flat = obs[..., :grid_size]
-        scalars = obs[..., grid_size:]  # (..., S)
+        scalars = obs[..., grid_size:]  # (..., S) or (..., S + A)
 
         # ── Reshape grid: (..., C*R) → (..., R, C) ──────────────────
         batch_shape = grid_flat.shape[:-1]
@@ -1197,23 +1271,51 @@ class EgoConv1dFactoredDiscreteActorCritic(nn.Module):
         features = x
 
         # ── Factored action heads ────────────────────────────────────
-        loc_logits = nn.Dense(
-            self.num_location_bins,
-            dtype=self.dtype,
-            param_dtype=self.param_dtype,
-            kernel_init=orthogonal(0.01),
-            name="loc_logits",
-        )(features)
+        if self.independent_heads:
+            A = self.num_agents
+            agent_id = obs[..., -A:].astype(self.dtype)  # (..., A)
 
-        price_logits = nn.Dense(
-            self.num_price_bins,
-            dtype=self.dtype,
-            param_dtype=self.param_dtype,
-            kernel_init=orthogonal(0.01),
-            name="price_logits",
-        )(features)
+            stacked_loc = jnp.stack([
+                nn.Dense(
+                    self.num_location_bins,
+                    dtype=self.dtype,
+                    param_dtype=self.param_dtype,
+                    kernel_init=orthogonal(0.01),
+                    name=f"loc_logits_{a}",
+                )(features)
+                for a in range(A)
+            ], axis=-2)  # (..., A, num_location_bins)
+            loc_logits = jnp.einsum("...a,...ab->...b", agent_id, stacked_loc)
 
-        # ── Critic head ──────────────────────────────────────────────
+            stacked_price = jnp.stack([
+                nn.Dense(
+                    self.num_price_bins,
+                    dtype=self.dtype,
+                    param_dtype=self.param_dtype,
+                    kernel_init=orthogonal(0.01),
+                    name=f"price_logits_{a}",
+                )(features)
+                for a in range(A)
+            ], axis=-2)  # (..., A, num_price_bins)
+            price_logits = jnp.einsum("...a,...ab->...b", agent_id, stacked_price)
+        else:
+            loc_logits = nn.Dense(
+                self.num_location_bins,
+                dtype=self.dtype,
+                param_dtype=self.param_dtype,
+                kernel_init=orthogonal(0.01),
+                name="loc_logits",
+            )(features)
+
+            price_logits = nn.Dense(
+                self.num_price_bins,
+                dtype=self.dtype,
+                param_dtype=self.param_dtype,
+                kernel_init=orthogonal(0.01),
+                name="price_logits",
+            )(features)
+
+        # ── Critic head (shared) ─────────────────────────────────────
         value = nn.Dense(
             1,
             dtype=self.dtype,

@@ -77,6 +77,12 @@ class TrainConfig:
     # Breaks weight sharing so each agent can learn a different strategy.
     independent: bool = False
 
+    # Per-agent actor heads (requires independent=True).
+    # When True, each agent gets its own location/price (discrete) or
+    # movement/price (continuous) head, selected via the agent-ID.
+    # The critic and feature backbone remain shared.
+    independent_heads: bool = False
+
     # Optimization
     learning_rate: float = 3e-4
     max_grad_norm: float = 0.5

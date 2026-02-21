@@ -35,6 +35,7 @@ buyer_choice_temp_start: null
 obs_type: conv_bin
 observation_mode: egocentric
 independent: true
+independent_heads: true
 target_kl: 0.1
 
 # ── Network ────────────────────────────────────────────────

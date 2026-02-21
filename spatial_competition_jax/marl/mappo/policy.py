@@ -128,7 +128,7 @@ class ContinuousPolicy:
     ) -> tuple[jnp.ndarray, jnp.ndarray]:
         gm, _, ba, bb, v_sym = self.network.apply(params, states)  # type: ignore[misc]
         movement = jnp.tanh(gm)
-        bounded = (ba - 1.0) / (ba + bb - 2.0)
+        bounded = (ba - 1.0) / (ba + bb - 2.0 + EPS)
         return jnp.concatenate([movement, bounded], axis=-1), symexp(v_sym)
 
     def value(self, params: Any, states: jnp.ndarray) -> jnp.ndarray:
@@ -256,7 +256,7 @@ class EgoContinuousPolicy:
     ) -> tuple[jnp.ndarray, jnp.ndarray]:
         gm, _, ba, bb, v_sym = self._forward(params, states)
         movement = jnp.tanh(gm)
-        bounded = (ba - 1.0) / (ba + bb - 2.0)
+        bounded = (ba - 1.0) / (ba + bb - 2.0 + EPS)
         return jnp.concatenate([movement, bounded], axis=-1), symexp(v_sym)
 
     def value(self, params: Any, states: jnp.ndarray) -> jnp.ndarray:

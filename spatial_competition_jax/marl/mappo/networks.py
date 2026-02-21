@@ -343,7 +343,9 @@ def deterministic_actions(
     gauss_means, _, beta_alphas, beta_betas, values = network.apply(params, state)  # type: ignore[misc]
 
     movement_actions = jnp.tanh(gauss_means)
-    bounded_actions = (beta_alphas - 1.0) / (beta_alphas + beta_betas - 2.0)
+    # Beta mode: (α-1)/(α+β-2).  Add EPS to denominator to guard
+    # against bfloat16 underflow where softplus → 0 makes α=β=1.
+    bounded_actions = (beta_alphas - 1.0) / (beta_alphas + beta_betas - 2.0 + EPS)
 
     actions = jnp.concatenate([movement_actions, bounded_actions], axis=-1)
     return actions, values
@@ -516,7 +518,9 @@ def ego_deterministic_actions(
     gauss_means, _, beta_alphas, beta_betas, values = network.apply(params, obs)  # type: ignore[misc]
 
     movement_actions = jnp.tanh(gauss_means)
-    bounded_actions = (beta_alphas - 1.0) / (beta_alphas + beta_betas - 2.0)
+    # Beta mode: (α-1)/(α+β-2).  Add EPS to denominator to guard
+    # against bfloat16 underflow where softplus → 0 makes α=β=1.
+    bounded_actions = (beta_alphas - 1.0) / (beta_alphas + beta_betas - 2.0 + EPS)
 
     actions = jnp.concatenate([movement_actions, bounded_actions], axis=-1)
     return actions, values

@@ -1,4 +1,8 @@
+# Low reservation price: alpha = t/v = 10/3 ≈ 3.33 (> 2)
+# Hinloopen & van Marrewijk (1999): MONOPOLISTIC equilibria
+# Firms separate into local monopolists, eq. price ≈ 1.5
+
 _parent: hotelling_1d_discrete_conv.yaml
 
 include_buyer_valuation: true
-buyer_value: 4.0
+buyer_value: 3.0

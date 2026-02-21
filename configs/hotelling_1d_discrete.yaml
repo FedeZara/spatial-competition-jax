@@ -7,10 +7,10 @@ num_sellers: 2
 max_price: 10.0
 include_quality: false
 movement_cost: 0.0
-transport_cost: 5.0
+transport_cost: 10.0
 transportation_cost_norm: 2.0
 transport_cost_exponent: 2.0
-new_buyers_per_step: 20
+new_buyers_per_step: 110
 max_env_steps: 100
 space_resolution: 10
 max_step_size: 1.0

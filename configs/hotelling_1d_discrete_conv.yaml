@@ -1,4 +1,5 @@
 # 1D Hotelling with discrete actions + Conv1D observations
+# Linear transport costs (Hinloopen & van Marrewijk, 1999)
 #
 # Observation per agent (4 spatial channels × R + 2 scalars):
 #   Grid: self_position | other_sellers | buyers | avg_price_blob
@@ -8,6 +9,11 @@
 # Conv1D(32,k=3)×2 → Flatten → Concat(2) → MLP(128,128) → Heads
 
 _parent: hotelling_1d_discrete.yaml
+
+# Override to linear transport costs (parent uses quadratic)
+transportation_cost_norm: 1.0
+transport_cost_exponent: 1.0
+transport_cost: 10.0
 
 # Use Conv1D bin-based observations
 obs_type: conv_bin

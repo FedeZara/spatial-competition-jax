@@ -108,6 +108,10 @@ class TrainConfig:
     eval_episodes: int = 10
     deterministic_eval: bool = True
 
+    # External exploitability check (0 = disabled)
+    exploit_check_interval: int = 0
+    exploit_br_updates: int = 5000
+
     # Entropy coefficient decay
     entropy_coef_start: float | None = None
     entropy_coef_end: float = 0.0

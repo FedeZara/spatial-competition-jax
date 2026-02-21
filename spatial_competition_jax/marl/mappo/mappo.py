@@ -245,8 +245,9 @@ class MAPPO:
             bootstrap, self.gamma, self.gae_lambda,
         )
 
-        # Ego mode: global normalisation; global mode: per-agent
-        advantages = normalize_advantages(advantages, per_agent=not _ego)
+        # Always normalise per-agent so each agent gets equally
+        # strong gradient signal regardless of absolute reward level.
+        advantages = normalize_advantages(advantages, per_agent=True)
         returns = symlog(returns)
 
         return transitions, advantages, returns, final_es, final_obs

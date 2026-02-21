@@ -1,0 +1,8 @@
+# 1D Hotelling with quadratic transport costs (d'Aspremont et al., 1979)
+# t·d² instead of t·d — maximal differentiation equilibrium
+# Sellers should locate at opposite ends of the market
+
+_parent: hotelling_1d_discrete.yaml
+
+transportation_cost_norm: 2.0
+transport_cost_exponent: 2.0

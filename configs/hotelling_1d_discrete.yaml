@@ -1,16 +1,25 @@
 # 1D Hotelling with discrete actions (11 location bins × 11 price bins)
-# Quadratic transport costs (d'Aspremont et al., 1979)
+# Linear transport costs (Hinloopen & van Marrewijk, 1999)
+#
+# Observation per agent (4 spatial channels × R + 2 scalars):
+#   Grid: self_position | other_sellers | buyers | avg_price_blob
+#   Scalars: own_position, own_price
+#
+# For R=10: obs_dim = 4×(10+1) + 2 = 46
+# Conv1D(32,k=3)×2 → Flatten → Concat(2) → MLP(128,128) → Heads
 
-# Environment
+_parent: default.yaml
+
+# ── Environment ────────────────────────────────────────────
 dimensions: 1
 num_sellers: 2
 max_price: 10.0
 include_quality: false
 movement_cost: 0.0
 transport_cost: 10.0
-transportation_cost_norm: 2.0
-transport_cost_exponent: 2.0
-new_buyers_per_step: 110
+transportation_cost_norm: 1.0
+transport_cost_exponent: 1.0
+new_buyers_per_step: 1100
 max_env_steps: 100
 space_resolution: 10
 max_step_size: 1.0
@@ -19,23 +28,21 @@ max_step_size: 1.0
 action_type: discrete
 num_location_bins: 11
 num_price_bins: 11
-observation_mode: egocentric
-independent: true
-target_kl: 0.1
 
 # No buyer choice temperature — hard argmax
 buyer_choice_temperature: null
 buyer_choice_temp_start: null
 
-# Include parent defaults for training hypers
-_parent: default.yaml
+# ── Observation ────────────────────────────────────────────
+obs_type: conv_bin
+observation_mode: egocentric
+independent: true
+target_kl: 0.1
 
-# ── Training overrides ──────────────────────────────────
-# Larger network to learn conditional (ego-dependent) strategies
+# ── Training ──────────────────────────────────────────────
 hidden_dims: [128, 128]
-
-# Much more training — differentiation emerges late
-total_updates: 200000
+total_updates: 500000
+save_interval: 10000
 
 # Keep exploration alive: higher entropy floor
 entropy_coef: 0.02

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 from datetime import datetime
 from pathlib import Path
 
@@ -35,6 +36,91 @@ from spatial_competition_jax.marl.utils.device import resolve_device
 from spatial_competition_jax.marl.utils.logging import Logger
 
 
+# ---------------------------------------------------------------------------
+# JSONL eval logger
+# ---------------------------------------------------------------------------
+
+
+class EvalLog:
+    """Append-only JSONL file for evaluation metrics."""
+
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self._fh = open(self.path, "a")  # noqa: SIM115
+
+    def write(self, step: int, metrics: dict[str, float]) -> None:
+        record = {"step": step, **metrics}
+        self._fh.write(json.dumps(record) + "\n")
+        self._fh.flush()
+
+    def close(self) -> None:
+        self._fh.close()
+
+
+# ---------------------------------------------------------------------------
+# External exploitability
+# ---------------------------------------------------------------------------
+
+
+def compute_external_exploitability(
+    agent: MAPPO,
+    wrapper: TrainingWrapper,
+    config: Config,
+    num_br_updates: int = 5000,
+) -> float:
+    """Estimate exploitability by training a short best-response.
+
+    Returns the reward advantage of the BR over the current policy.
+    """
+    from spatial_competition_jax.marl.psro.best_response import BestResponseTrainer
+    from spatial_competition_jax.marl.psro.psro import _build_single_agent_policy
+
+    import numpy as np
+
+    # Build a single-agent policy for the BR
+    br_policy = _build_single_agent_policy(config, wrapper)
+
+    # Current policy as the single-member population
+    population = [agent.params]
+    meta_strategy = np.array([1.0], dtype=np.float64)
+
+    trainer = BestResponseTrainer(
+        wrapper=wrapper,
+        policy=br_policy,
+        population=population,
+        meta_strategy=meta_strategy,
+        num_envs=config.train.num_envs,
+        rollout_length=config.train.rollout_length,
+        gamma=config.train.gamma,
+        gae_lambda=config.train.gae_lambda,
+        clip_epsilon=config.train.clip_epsilon,
+        value_coef=config.train.value_coef,
+        entropy_coef=config.train.entropy_coef,
+        learning_rate=config.train.learning_rate,
+        max_grad_norm=config.train.max_grad_norm,
+        ppo_epochs=config.train.ppo_epochs,
+        num_minibatches=config.train.num_minibatches,
+        seed=config.train.seed + 99999,
+    )
+
+    best_reward = -float("inf")
+    for step in range(1, num_br_updates + 1):
+        trans, adv, ret, stats = trainer.collect_rollout()
+        trainer.update(trans, adv, ret)
+        best_reward = max(best_reward, stats["mean_reward"])
+
+    # Baseline: current policy's mean reward (from last rollout stats)
+    baseline_reward = stats["mean_reward"]
+
+    return float(max(best_reward - baseline_reward, 0.0))
+
+
+# ---------------------------------------------------------------------------
+# Policy builder
+# ---------------------------------------------------------------------------
+
+
 def parse_args() -> argparse.Namespace:
     """Parse command-line arguments."""
     parser = argparse.ArgumentParser(description="Train MAPPO (JAX) on Hotelling env")
@@ -63,11 +149,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def build_policy(config: Config, wrapper: TrainingWrapper) -> PolicyAdapter:
-    """Build the appropriate PolicyAdapter from config.
-
-    Handles all combos: {global, egocentric} × {continuous, discrete}
-    and the Conv1D variant when ``obs_type == "conv_bin"``.
-    """
+    """Build the appropriate PolicyAdapter from config."""
     hidden_dims = tuple(config.train.hidden_dims)
     ego = config.train.observation_mode == "egocentric"
     discrete = config.env.action_type == "discrete"
@@ -76,7 +158,6 @@ def build_policy(config: Config, wrapper: TrainingWrapper) -> PolicyAdapter:
     ind_heads = config.train.independent_heads and config.train.independent
 
     if ego and discrete and conv_bin:
-        # Conv1D network for spatial grid observations
         scalar_dim = wrapper.dimensions + 1
         if wrapper.include_quality:
             scalar_dim += 1
@@ -93,8 +174,7 @@ def build_policy(config: Config, wrapper: TrainingWrapper) -> PolicyAdapter:
         return EgoFactoredDiscretePolicy(net, num_agents=wrapper.num_agents)
 
     if ego and not discrete and conv_bin:
-        # Conv2D network for 2-D spatial grid observations (continuous actions)
-        gp = wrapper.space_resolution + 1  # grid points per dimension
+        gp = wrapper.space_resolution + 1
         scalar_dim = wrapper.dimensions + 1
         if wrapper.include_quality:
             scalar_dim += 1
@@ -132,10 +212,8 @@ def main() -> None:
     """Run the training loop."""
     args = parse_args()
 
-    # ── device selection ───────────────────────────────────────────────
     device = resolve_device(args.device)
 
-    # ── config ─────────────────────────────────────────────────────────
     config_path = Path(__file__).parent.parent / args.config
     if config_path.exists():
         config = Config.from_yaml(config_path)
@@ -150,7 +228,6 @@ def main() -> None:
     if args.no_tensorboard:
         config.train.use_tensorboard = False
 
-    # ── experiment name ────────────────────────────────────────────────
     if args.experiment_name is None:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         action_tag = "disc" if config.env.action_type == "discrete" else "cont"
@@ -158,7 +235,6 @@ def main() -> None:
     else:
         experiment_name = args.experiment_name
 
-    # ── logger ─────────────────────────────────────────────────────────
     logger = Logger(
         log_dir=config.train.log_dir,
         use_tensorboard=config.train.use_tensorboard,
@@ -177,7 +253,6 @@ def main() -> None:
     print(f"Updates:     {config.train.total_updates}")
     print("=" * 60)
 
-    # All array creation and JIT compilation is scoped to *device*.
     with jax.default_device(device):
         _train(args, config, logger, experiment_name)
 
@@ -222,12 +297,11 @@ def _train(
         buyer_dist_weights=config.env.buyer_dist_weights,
     )
 
-    # ── independent PPO: append agent IDs to ego obs ────────────────
+    # ── independent PPO ───────────────────────────────────────────────
     if config.train.independent and config.train.observation_mode == "egocentric":
         wrapper.enable_agent_id()
         print(f"Independent: True (agent ID appended to obs)")
 
-    # ── policy adapter ────────────────────────────────────────────────
     use_ego = config.train.observation_mode == "egocentric"
     policy = build_policy(config, wrapper)
 
@@ -240,7 +314,7 @@ def _train(
         print(f"Action dim:  {wrapper.action_dim}")
     print(f"Num agents:  {wrapper.num_agents}")
 
-    # ── MAPPO agent ────────────────────────────────────────────────────
+    # ── MAPPO agent ───────────────────────────────────────────────────
     agent = MAPPO(
         wrapper=wrapper,
         policy=policy,
@@ -259,17 +333,17 @@ def _train(
         seed=config.train.seed,
     )
 
-    # Verify all initial arrays landed on the chosen device.
     _check_device = jax.tree.leaves(agent.train_state.params)[0]
     print(f"Params on:   {_check_device.devices()}")
 
-    # ── annealing setup ────────────────────────────────────────────────
+    # ── annealing setup ───────────────────────────────────────────────
     use_temp_anneal = (
-        config.env.buyer_choice_temperature is not None and config.train.buyer_choice_temp_start is not None
+        config.env.buyer_choice_temperature is not None
+        and config.train.buyer_choice_temp_start is not None
     )
     if use_temp_anneal:
         temp_start = config.train.buyer_choice_temp_start
-        assert temp_start is not None  # for type checker
+        assert temp_start is not None
         temp_end = config.train.buyer_choice_temp_end
         temp_anneal_frac = config.train.buyer_choice_temp_anneal_frac
         print(f"Temperature annealing: {temp_start} → {temp_end} over {temp_anneal_frac * 100:.0f}% of training")
@@ -277,12 +351,21 @@ def _train(
     use_entropy_anneal = config.train.entropy_coef_start is not None
     if use_entropy_anneal:
         ent_start = config.train.entropy_coef_start
-        assert ent_start is not None  # for type checker
+        assert ent_start is not None
         ent_end = config.train.entropy_coef_end
         ent_anneal_frac = config.train.entropy_coef_anneal_frac
         print(f"Entropy coef annealing: {ent_start} → {ent_end} over {ent_anneal_frac * 100:.0f}% of training")
 
-    # ── training loop ──────────────────────────────────────────────────
+    # ── exploit check setup ───────────────────────────────────────────
+    exploit_interval = config.train.exploit_check_interval
+    exploit_br_updates = config.train.exploit_br_updates
+    if exploit_interval > 0:
+        print(f"Exploitability check every {exploit_interval} steps ({exploit_br_updates} BR updates)")
+
+    # ── JSONL eval logger ─────────────────────────────────────────────
+    eval_log = EvalLog(logger.experiment_dir / "eval_metrics.jsonl")
+
+    # ── training loop ─────────────────────────────────────────────────
     total_timesteps = 0
     best_eval_reward = float("-inf")
     update = 0
@@ -292,53 +375,42 @@ def _train(
 
     try:
         for update in range(1, config.train.total_updates + 1):
-            # Compute current temperature
+            # ── Annealing ─────────────────────────────────────────
             if use_temp_anneal:
-                assert temp_start is not None  # for type checker
+                assert temp_start is not None
                 temperature: float | None = linear_anneal(
-                    update,
-                    config.train.total_updates,
-                    temp_start,
-                    temp_end,
-                    temp_anneal_frac,
+                    update, config.train.total_updates,
+                    temp_start, temp_end, temp_anneal_frac,
                 )
             else:
                 temperature = None
 
-            # Compute current entropy coefficient
             if use_entropy_anneal:
-                assert ent_start is not None  # for type checker
+                assert ent_start is not None
                 cur_entropy_coef: float | None = linear_anneal(
-                    update,
-                    config.train.total_updates,
-                    ent_start,
-                    ent_end,
-                    ent_anneal_frac,
+                    update, config.train.total_updates,
+                    ent_start, ent_end, ent_anneal_frac,
                 )
             else:
                 cur_entropy_coef = None
 
-            # Collect rollout
+            # ── Collect + update ──────────────────────────────────
             transitions, advantages, returns, rollout_stats = agent.collect_rollout(
                 temperature=temperature,
             )
             total_timesteps += config.train.rollout_length * config.train.num_envs * wrapper.num_agents
 
-            # PPO update
             update_stats = agent.update(
-                transitions,
-                advantages,
-                returns,
+                transitions, advantages, returns,
                 entropy_coef=cur_entropy_coef,
             )
 
-            # Logging
+            # ── Train logging ─────────────────────────────────────
             logger.set_step(update)
 
             if update % config.train.log_interval == 0:
                 metrics = {
-                    **rollout_stats,
-                    **update_stats,
+                    **rollout_stats, **update_stats,
                     "timesteps": total_timesteps,
                 }
                 if temperature is not None:
@@ -347,21 +419,17 @@ def _train(
 
                 print_metrics: dict[str, float] = {
                     "reward": rollout_stats["mean_reward"],
-                    "policy_loss": update_stats["policy_loss"],
-                    "value_loss": update_stats["value_loss"],
-                    "entropy": update_stats["entropy"],
+                    "ploss": update_stats["policy_loss"],
+                    "vloss": update_stats["value_loss"],
+                    "ent": update_stats["entropy"],
+                    "kl": update_stats.get("approx_kl", 0.0),
+                    "clip": update_stats.get("clip_fraction", 0.0),
                 }
-                if temperature is not None:
-                    print_metrics["temp"] = temperature
                 if cur_entropy_coef is not None:
-                    print_metrics["ent_coef"] = cur_entropy_coef
-                logger.print_metrics(
-                    print_metrics,
-                    step=update,
-                    prefix="Train",
-                )
+                    print_metrics["ec"] = cur_entropy_coef
+                logger.print_metrics(print_metrics, step=update, prefix="Train")
 
-            # Evaluation
+            # ── Evaluation ────────────────────────────────────────
             if update % config.train.eval_interval == 0:
                 if use_ego:
                     eval_stats = evaluate_ego_policy(
@@ -384,14 +452,20 @@ def _train(
                         temperature=config.train.buyer_choice_temp_end if use_temp_anneal else None,
                     )
                 logger.log_metrics(eval_stats, prefix="eval")
+                eval_log.write(update, eval_stats)
 
-                eval_log: dict[str, float] = {
+                # Print summary
+                eval_print: dict[str, float] = {
                     "reward": eval_stats["eval_reward_mean"],
                 }
                 if "eval_seller_distance" in eval_stats:
-                    eval_log["distance"] = eval_stats["eval_seller_distance"]
-                eval_log["price"] = eval_stats["eval_price_mean"]
-                logger.print_metrics(eval_log, step=update, prefix="Eval")
+                    eval_print["dist"] = eval_stats["eval_seller_distance"]
+                eval_print["price"] = eval_stats["eval_price_mean"]
+                eval_print["spread"] = eval_stats["eval_price_spread"]
+                # Per-agent rewards
+                for a in range(wrapper.num_agents):
+                    eval_print[f"r{a}"] = eval_stats[f"eval_reward_agent_{a}"]
+                logger.print_metrics(eval_print, step=update, prefix="Eval")
 
                 if eval_stats["eval_reward_mean"] > best_eval_reward:
                     best_eval_reward = eval_stats["eval_reward_mean"]
@@ -404,7 +478,18 @@ def _train(
                     )
                     print(f"  → New best model (reward: {best_eval_reward:.2f})")
 
-            # Periodic checkpoint
+            # ── External exploitability ───────────────────────────
+            if exploit_interval > 0 and update % exploit_interval == 0:
+                print(f"  Computing exploitability ({exploit_br_updates} BR updates) …")
+                exploit = compute_external_exploitability(
+                    agent, wrapper, config,
+                    num_br_updates=exploit_br_updates,
+                )
+                logger.log_metrics({"exploitability": exploit}, prefix="exploit")
+                eval_log.write(update, {"external_exploitability": exploit})
+                print(f"  Exploitability: {exploit:.4f}")
+
+            # ── Periodic checkpoint ───────────────────────────────
             if update % config.train.save_interval == 0:
                 save_checkpoint(
                     path=logger.experiment_dir / f"checkpoint_{update}.pkl",
@@ -416,7 +501,7 @@ def _train(
     except KeyboardInterrupt:
         print("\n\nTraining interrupted.")
 
-    # ── final save ─────────────────────────────────────────────────────
+    # ── final save ────────────────────────────────────────────────────
     print("-" * 60)
     save_checkpoint(
         path=logger.experiment_dir / "final_model.pkl",
@@ -425,7 +510,7 @@ def _train(
         opt_state=agent.opt_state,
     )
 
-    # ── final evaluation ───────────────────────────────────────────────
+    # ── final evaluation ──────────────────────────────────────────────
     print("Final evaluation …")
     if use_ego:
         final_eval = evaluate_ego_policy(
@@ -433,7 +518,7 @@ def _train(
             params=agent.params,
             wrapper=wrapper,
             num_episodes=20,
-            deterministic=True,
+            deterministic=config.train.deterministic_eval,
             temperature=config.train.buyer_choice_temp_end if use_temp_anneal else None,
             is_discrete=config.env.action_type == "discrete",
             is_factored=config.env.action_type == "discrete",
@@ -444,15 +529,23 @@ def _train(
             params=agent.params,
             wrapper=wrapper,
             num_episodes=20,
-            deterministic=True,
+            deterministic=config.train.deterministic_eval,
             temperature=config.train.buyer_choice_temp_end if use_temp_anneal else None,
         )
+
+    eval_log.write(update, {**final_eval, "final": True})
+
     print(f"  Reward:   {final_eval['eval_reward_mean']:.2f} ± {final_eval['eval_reward_std']:.2f}")
     print(f"  Position: {final_eval['eval_position_mean']:.3f}")
     print(f"  Price:    {final_eval['eval_price_mean']:.2f}")
     if "eval_seller_distance" in final_eval:
         print(f"  Distance: {final_eval['eval_seller_distance']:.3f}")
+    for a in range(wrapper.num_agents):
+        print(f"  Agent {a}: reward={final_eval[f'eval_reward_agent_{a}']:.2f} "
+              f"price={final_eval[f'eval_price_agent_{a}']:.2f} "
+              f"share={final_eval[f'eval_market_share_agent_{a}']:.1%}")
 
+    eval_log.close()
     logger.close()
 
     print("=" * 60)

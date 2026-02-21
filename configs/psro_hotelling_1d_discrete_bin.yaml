@@ -1,7 +1,0 @@
-# PSRO configuration for 1D Hotelling with bin-based observations
-# Uses the environment's native grid observations (local_view)
-
-_parent: psro_hotelling_1d_discrete.yaml
-
-# Use bin-based observations from the environment
-obs_type: bin

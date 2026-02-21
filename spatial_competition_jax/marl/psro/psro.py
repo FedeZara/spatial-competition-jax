@@ -203,22 +203,26 @@ class PSROLoop:
             # ── 1. Update payoff matrix ───────────────────────────────
             print("  Building payoff matrix …")
             payoff_matrix = self.payoff_table.update(self.population)
-            print(f"  Payoff matrix ({payoff_matrix.shape[0]}x{payoff_matrix.shape[1]}):")
-            _print_matrix(payoff_matrix)
 
             # ── 2. Solve meta-game ────────────────────────────────────
             self.meta_strategy = solve_meta_game(payoff_matrix)
             exploit = compute_exploitability(payoff_matrix, self.meta_strategy)
             exploitability_history.append(exploit)
 
-            print(f"  Meta-strategy: {_fmt_vec(self.meta_strategy)}")
-            print(f"  Exploitability: {exploit:.6f}")
+            meta_entropy = -float(np.sum(
+                self.meta_strategy * np.log(self.meta_strategy + 1e-12)
+            ))
+            diversity = _population_diversity(self.population)
+            print(f"  σ: {_fmt_nonzero(self.meta_strategy)}")
+            print(f"  exploit={exploit:.6f}  ent={meta_entropy:.4f}  div={diversity:.4f}")
 
             self.logger.set_step(iteration)
             self.logger.log_metrics(
                 {
                     "exploitability": exploit,
                     "population_size": len(self.population),
+                    "meta_entropy": meta_entropy,
+                    "population_diversity": diversity,
                 },
                 prefix="psro",
             )
@@ -255,9 +259,7 @@ class PSROLoop:
         final_exploit = compute_exploitability(payoff_matrix, self.meta_strategy)
         exploitability_history.append(final_exploit)
 
-        print(f"  Payoff matrix ({payoff_matrix.shape[0]}x{payoff_matrix.shape[1]}):")
-        _print_matrix(payoff_matrix)
-        print(f"  Meta-strategy: {_fmt_vec(self.meta_strategy)}")
+        print(f"  σ: {_fmt_nonzero(self.meta_strategy)}")
         print(f"  Exploitability: {final_exploit:.6f}")
 
         self._save_checkpoint(num_iterations, exploitability_history, final=True)
@@ -592,6 +594,39 @@ def _fmt_vec(v: np.ndarray, precision: int = 3) -> str:
     """Format a probability vector for printing."""
     parts = [f"{x:.{precision}f}" for x in v]
     return "[" + ", ".join(parts) + "]"
+
+
+def _fmt_nonzero(v: np.ndarray, threshold: float = 0.01) -> str:
+    """Format only the significant entries of a probability vector.
+
+    Shows ``index:weight`` for entries above *threshold*.
+    Example: ``{0: 0.45, 3: 0.30, 7: 0.25}`` (K=10)
+    """
+    parts = [f"{i}:{x:.3f}" for i, x in enumerate(v) if x >= threshold]
+    return "{" + ", ".join(parts) + f"}} (K={len(v)})"
+
+
+def _population_diversity(population: list[Any]) -> float:
+    """Mean pairwise L2 distance between flattened parameter vectors.
+
+    Returns 0.0 for populations with fewer than 2 policies.
+    """
+    K = len(population)
+    if K < 2:
+        return 0.0
+
+    flat = [
+        jnp.concatenate([p.ravel() for p in jax.tree.leaves(params)])
+        for params in population
+    ]
+
+    total = 0.0
+    count = 0
+    for i in range(K):
+        for j in range(i + 1, K):
+            total += float(jnp.linalg.norm(flat[i] - flat[j]))
+            count += 1
+    return total / count
 
 
 def _print_matrix(m: np.ndarray, indent: int = 4) -> None:

@@ -1,20 +1,19 @@
 """Meta-game solvers for PSRO.
 
-Provides solvers for finding a symmetric Nash equilibrium of the
-empirical normal-form game, plus utilities to measure exploitability.
+Provides solvers for finding Nash equilibria of the empirical
+normal-form game, plus utilities to measure exploitability.
 
-Two solvers are available:
+**Symmetric solvers** (single population):
 
-* **Logit dynamics** (default) — maintains logits and does additive
-  gradient updates followed by softmax.  Unlike multiplicative-weights
-  replicator dynamics, strategies at low probability can always be
-  *revived*, preventing the solver from collapsing to a pure strategy
-  that isn't actually a Nash equilibrium.
+* **Logit dynamics** — maintains logits and does additive gradient
+  updates followed by softmax.
+* **LP Nash** — exact via the antisymmetric game ``A = U − Uᵀ``.
 
-* **Linear-programme Nash** — for 2-player symmetric games, the
-  symmetric Nash can be found exactly via LP (maximin of the
-  antisymmetric game ``A = U − Uᵀ``).  This is used as a fallback /
-  verification tool.
+**Asymmetric solver** (two populations):
+
+* **Bimatrix logit dynamics** — alternating logit best-response
+  updates for each player.  Finds an approximate Nash of the
+  general-sum bimatrix game ``(U0, U1)``.
 """
 
 from __future__ import annotations
@@ -243,3 +242,114 @@ def compute_exploitability(
     mixture_value = s @ expected
 
     return float(max(best_response_value - mixture_value, 0.0))
+
+
+# ---------------------------------------------------------------------------
+# Bimatrix solvers (asymmetric / two-population PSRO)
+# ---------------------------------------------------------------------------
+
+
+def solve_bimatrix_game(
+    U0: np.ndarray,
+    U1: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Find an approximate Nash equilibrium of a bimatrix game.
+
+    Uses alternating logit dynamics: each player updates its logits
+    via gradient ascent against the opponent's current mixed strategy.
+
+    Args:
+        U0: ``(K0, K1)`` payoff matrix for player 0.
+            ``U0[i, j]`` is player 0's payoff when player 0 plays
+            pure strategy *i* and player 1 plays pure strategy *j*.
+        U1: ``(K0, K1)`` payoff matrix for player 1.
+            ``U1[i, j]`` is player 1's payoff in the same matchup.
+
+    Returns:
+        ``(sigma0, sigma1)`` — mixed strategies for each player.
+    """
+    K0, K1 = U0.shape
+    if K0 == 1 and K1 == 1:
+        return np.ones(1, dtype=np.float64), np.ones(1, dtype=np.float64)
+
+    U0 = U0.astype(np.float64)
+    U1 = U1.astype(np.float64)
+
+    logits0 = np.zeros(K0, dtype=np.float64)
+    logits1 = np.zeros(K1, dtype=np.float64)
+    sigma0 = _softmax(logits0)
+    sigma1 = _softmax(logits1)
+
+    dt = 0.05
+    tol = 1e-9
+
+    for _ in range(100_000):
+        # Player 0 best-responds to sigma1
+        expected0 = U0 @ sigma1  # (K0,)
+        avg0 = sigma0 @ expected0
+        adv0 = expected0 - avg0
+        dt0 = min(dt, 1.0 / (np.max(np.abs(adv0)) + 1e-12))
+        logits0 += dt0 * adv0
+        logits0 -= logits0.mean()
+
+        # Player 1 best-responds to sigma0
+        expected1 = U1.T @ sigma0  # (K1,)
+        avg1 = sigma1 @ expected1
+        adv1 = expected1 - avg1
+        dt1 = min(dt, 1.0 / (np.max(np.abs(adv1)) + 1e-12))
+        logits1 += dt1 * adv1
+        logits1 -= logits1.mean()
+
+        new_sigma0 = _softmax(logits0)
+        new_sigma1 = _softmax(logits1)
+
+        if (np.max(np.abs(new_sigma0 - sigma0)) < tol
+                and np.max(np.abs(new_sigma1 - sigma1)) < tol):
+            sigma0 = new_sigma0
+            sigma1 = new_sigma1
+            break
+
+        sigma0 = new_sigma0
+        sigma1 = new_sigma1
+
+    return sigma0, sigma1
+
+
+def compute_exploitability_bimatrix(
+    U0: np.ndarray,
+    U1: np.ndarray,
+    sigma0: np.ndarray,
+    sigma1: np.ndarray,
+) -> float:
+    """Compute summed exploitability of a bimatrix strategy profile.
+
+    ::
+
+        exploit = (max_i e_i^T U0 σ1 - σ0^T U0 σ1)
+                + (max_j e_j^T U1^T σ0 - σ1^T U1^T σ0)
+
+    Zero means ``(σ0, σ1)`` is a Nash equilibrium.
+
+    Args:
+        U0: ``(K0, K1)`` player 0 payoff matrix.
+        U1: ``(K0, K1)`` player 1 payoff matrix.
+        sigma0: ``(K0,)`` player 0 mixed strategy.
+        sigma1: ``(K1,)`` player 1 mixed strategy.
+
+    Returns:
+        Non-negative scalar exploitability (sum of both players).
+    """
+    U0 = U0.astype(np.float64)
+    U1 = U1.astype(np.float64)
+    s0 = sigma0.astype(np.float64)
+    s1 = sigma1.astype(np.float64)
+
+    # Player 0's incentive to deviate
+    exp0 = U0 @ s1
+    exploit0 = max(exp0.max() - s0 @ exp0, 0.0)
+
+    # Player 1's incentive to deviate
+    exp1 = U1.T @ s0
+    exploit1 = max(exp1.max() - s1 @ exp1, 0.0)
+
+    return float(exploit0 + exploit1)

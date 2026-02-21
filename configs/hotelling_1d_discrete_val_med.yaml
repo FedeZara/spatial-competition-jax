@@ -2,7 +2,7 @@
 # Hinloopen & van Marrewijk (1999): QUARTILE equilibrium
 # Firms at market quartiles (0.25 from ends), eq. price ≈ 3.5
 
-_parent: hotelling_1d_discrete_conv.yaml
+_parent: hotelling_1d_discrete.yaml
 
 include_buyer_valuation: true
 buyer_value: 6.0

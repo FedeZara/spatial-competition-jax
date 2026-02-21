@@ -47,12 +47,16 @@ total_updates: 500000
 save_interval: 10000
 num_envs: 64
 rollout_length: 128
+gamma: 0.995
+deterministic_eval: false
 
 # Keep exploration alive in larger state space
 entropy_coef: 0.02
 entropy_coef_start: 0.02
-entropy_coef_end: 0.005
+entropy_coef_end: 0.001
 entropy_coef_anneal_frac: 0.9
 
 # PPO
-learning_rate: 0.0003
+learning_rate: 0.0002
+num_minibatches: 2
+ppo_epochs: 4

@@ -19,3 +19,4 @@ transport_cost: 10.0
 obs_type: conv_bin
 
 total_updates: 500000
+save_interval: 10000

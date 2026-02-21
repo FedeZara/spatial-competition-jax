@@ -1,8 +1,8 @@
-# High reservation price: alpha = t/v = 10/10 = 1.0 (< 8/7)
-# Hinloopen & van Marrewijk (1999): NO pure-strategy symmetric equilibrium
-# (d'Aspremont non-existence regime)
+# High reservation price: alpha = t/v = 10/8 = 1.25 (between 8/7 and 4/3)
+# Hinloopen & van Marrewijk (1999): COMPETITIVE equilibrium
+# Firms locate between 1/4 and 1/2 of market apart, eq. price ≈ 5.0
 
 _parent: hotelling_1d_discrete_conv.yaml
 
 include_buyer_valuation: true
-buyer_value: 10.0
+buyer_value: 8.0

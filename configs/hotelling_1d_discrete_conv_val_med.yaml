@@ -1,8 +1,8 @@
-# Intermediate reservation price: alpha = t/v = 10/8 = 1.25 (between 8/7 and 4/3)
-# Hinloopen & van Marrewijk (1999): COMPETITIVE equilibrium
-# Firms locate between 1/4 and 1/2 of market apart, eq. price ≈ 5.0
+# Medium reservation price: alpha = t/v = 10/6 ≈ 1.67 (between 4/3 and 2)
+# Hinloopen & van Marrewijk (1999): QUARTILE equilibrium
+# Firms at market quartiles (0.25 from ends), eq. price ≈ 3.5
 
 _parent: hotelling_1d_discrete_conv.yaml
 
 include_buyer_valuation: true
-buyer_value: 8.0
+buyer_value: 6.0

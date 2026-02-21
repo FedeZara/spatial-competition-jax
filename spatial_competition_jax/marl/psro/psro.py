@@ -243,7 +243,7 @@ class PSROLoop:
             print(f"  Population size: {K}")
 
             # ── 5. Save checkpoint ────────────────────────────────────
-            if iteration % self.config.psro.save_interval == 0:
+            if iteration % self.config.psro.psro_save_interval == 0:
                 self._save_checkpoint(iteration, exploitability_history)
 
         # ── Final solve after adding the last policy ──────────────────
@@ -337,7 +337,7 @@ class PSROLoop:
         )
 
         num_updates = cfg.psro.num_br_updates
-        log_interval = cfg.psro.log_interval
+        log_interval = cfg.psro.psro_log_interval
 
         # ── Early stopping state ──────────────────────────────────────
         patience = cfg.psro.br_patience

@@ -146,8 +146,8 @@ class PSROConfig:
     br_early_stop_delta: float = 0.05
 
     # Logging
-    log_interval: int = 50
-    save_interval: int = 1
+    psro_log_interval: int = 50
+    psro_save_interval: int = 1
 
     # Evaluation temperature override (for softmax buyer choice)
     eval_temperature: float | None = None

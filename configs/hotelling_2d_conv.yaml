@@ -43,6 +43,7 @@ hidden_dims: [256, 256]
 
 # ── Training ───────────────────────────────────────────────
 total_updates: 500000
+save_interval: 10000
 num_envs: 64
 rollout_length: 128
 

@@ -17,8 +17,8 @@ br_mix_alpha_end: 0.1
 br_mix_alpha_anneal_frac: 0.7
 br_patience: 20
 br_early_stop_delta: 0.05
-log_interval: 50
-save_interval: 2
+psro_log_interval: 50
+psro_save_interval: 2
 
 # Override training hypers for best-response oracle
 total_updates: 50000

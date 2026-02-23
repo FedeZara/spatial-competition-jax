@@ -1,31 +1,31 @@
-# 2D Hotelling with Conv2D observations + continuous actions
+# 2D Hotelling with Conv2D observations + 3-way factored discrete actions
 #
-# Observation per agent (4 spatial channels × 51² + 3 scalars):
-#   Grid: self_blob | other_sellers_blob | buyer_density_blob | avg_price_blob
-#   Scalars: own_pos_x, own_pos_y, own_price
+# Actions: loc_x(11) × loc_y(11) × price(11) = 3 independent categoricals
+# Reachable positions: 0, 10, 20, ..., 100 on a 100-resolution grid
 #
 # Conv2D(32,k=5,s=2) → Conv2D(64,k=3,s=2) → Conv2D(128,k=3,s=2)
-#   → GlobalAvgPool → Concat(3 scalars) → MLP(256,256) → Heads
-#
-# Action: continuous movement vector (2D Gaussian) + price (Beta)
+#   → GlobalAvgPool → Concat(scalars) → MLP(256,256) → 3 Categorical Heads
 
 _parent: default.yaml
 
 # ── Environment ────────────────────────────────────────────
 dimensions: 2
 num_sellers: 2
-space_resolution: 50
+space_resolution: 20
 max_price: 10.0
 include_quality: false
 movement_cost: 0.0
 transport_cost: 10.0
 transportation_cost_norm: 2.0
-new_buyers_per_step: 200
+new_buyers_per_step: 500
+despawn_no_purchase: true
 max_env_steps: 200
-max_step_size: 0.1
+max_step_size: 1.0
 
-# Continuous action space (movement vector + price)
-action_type: continuous
+# Discrete action space (3-way factored)
+action_type: discrete
+num_location_bins: 11
+num_price_bins: 11
 
 # No buyer choice temperature — hard argmax
 buyer_choice_temperature: null
@@ -39,7 +39,6 @@ independent_heads: true
 target_kl: 0.02
 
 # ── Network ────────────────────────────────────────────────
-# MLP hidden dims (after Conv2D + GlobalAvgPool + scalar concat)
 hidden_dims: [256, 256]
 
 # ── Training ───────────────────────────────────────────────
@@ -50,13 +49,13 @@ rollout_length: 128
 gamma: 0.995
 deterministic_eval: false
 
-# Keep exploration alive in larger state space
-entropy_coef: 0.02
-entropy_coef_start: 0.02
-entropy_coef_end: 0.001
+# Entropy
+entropy_coef: 0.01
+entropy_coef_start: 0.01
+entropy_coef_end: 0.002
 entropy_coef_anneal_frac: 0.9
 
 # PPO
-learning_rate: 0.0001
-num_minibatches: 2
+learning_rate: 0.0003
+num_minibatches: 4
 ppo_epochs: 4

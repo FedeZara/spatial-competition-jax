@@ -13,23 +13,7 @@ import jax
 from spatial_competition_jax.marl.config import Config
 from spatial_competition_jax.marl.mappo.evaluation import evaluate_ego_policy, evaluate_policy
 from spatial_competition_jax.marl.mappo.mappo import MAPPO, linear_anneal
-from spatial_competition_jax.marl.mappo.networks import (
-    DiscreteActorCritic,
-    EgoActorCritic,
-    EgoConv1dFactoredDiscreteActorCritic,
-    EgoConv2dActorCritic,
-    EgoDiscreteActorCritic,
-    EgoFactoredDiscreteActorCritic,
-    SharedActorCritic,
-)
-from spatial_competition_jax.marl.mappo.policy import (
-    ContinuousPolicy,
-    DiscretePolicy,
-    EgoContinuousPolicy,
-    EgoDiscretePolicy,
-    EgoFactoredDiscretePolicy,
-    PolicyAdapter,
-)
+from spatial_competition_jax.marl.policy_builder import build_policy
 from spatial_competition_jax.marl.training_wrapper import TrainingWrapper
 from spatial_competition_jax.marl.utils.checkpoints import save_checkpoint
 from spatial_competition_jax.marl.utils.device import resolve_device
@@ -148,66 +132,6 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def build_policy(config: Config, wrapper: TrainingWrapper) -> PolicyAdapter:
-    """Build the appropriate PolicyAdapter from config."""
-    hidden_dims = tuple(config.train.hidden_dims)
-    ego = config.train.observation_mode == "egocentric"
-    discrete = config.env.action_type == "discrete"
-    conv_bin = config.train.obs_type == "conv_bin"
-
-    ind_heads = config.train.independent_heads and config.train.independent
-
-    if ego and discrete and conv_bin:
-        scalar_dim = wrapper.dimensions + 1
-        if wrapper.include_quality:
-            scalar_dim += 1
-        net = EgoConv1dFactoredDiscreteActorCritic(
-            num_location_bins=wrapper.num_location_bins,
-            num_price_bins=wrapper.num_price_bins,
-            spatial_resolution=wrapper.space_resolution,
-            num_grid_channels=wrapper._conv_grid_channels,
-            num_scalar_features=scalar_dim,
-            mlp_hidden_dims=hidden_dims,
-            independent_heads=ind_heads,
-            num_agents=wrapper.num_agents,
-        )
-        return EgoFactoredDiscretePolicy(net, num_agents=wrapper.num_agents)
-
-    if ego and not discrete and conv_bin:
-        gp = wrapper.space_resolution + 1
-        scalar_dim = wrapper.dimensions + 1
-        if wrapper.include_quality:
-            scalar_dim += 1
-        net = EgoConv2dActorCritic(
-            movement_dim=wrapper.movement_dim,
-            bounded_dim=wrapper.bounded_dim,
-            spatial_resolution=gp,
-            num_grid_channels=wrapper._conv_grid_channels,
-            num_scalar_features=scalar_dim,
-            mlp_hidden_dims=hidden_dims,
-            independent_heads=ind_heads,
-            num_agents=wrapper.num_agents,
-        )
-        return EgoContinuousPolicy(net, num_agents=wrapper.num_agents)
-
-    if ego and discrete:
-        net = EgoFactoredDiscreteActorCritic(
-            num_location_bins=wrapper.num_location_bins,
-            num_price_bins=wrapper.num_price_bins,
-            hidden_dims=hidden_dims,
-        )
-        return EgoFactoredDiscretePolicy(net, num_agents=wrapper.num_agents)
-    if ego:
-        net = EgoActorCritic(movement_dim=wrapper.movement_dim, bounded_dim=wrapper.bounded_dim, hidden_dims=hidden_dims)
-        return EgoContinuousPolicy(net, num_agents=wrapper.num_agents)
-    if discrete:
-        net = DiscreteActorCritic(num_actions=wrapper.num_actions, num_agents=wrapper.num_agents, hidden_dims=hidden_dims)
-        return DiscretePolicy(net)
-
-    net = SharedActorCritic(movement_dim=wrapper.movement_dim, bounded_dim=wrapper.bounded_dim, num_agents=wrapper.num_agents, hidden_dims=hidden_dims)
-    return ContinuousPolicy(net)
-
-
 def main() -> None:
     """Run the training loop."""
     args = parse_args()
@@ -300,7 +224,8 @@ def _train(
     # ── independent PPO ───────────────────────────────────────────────
     if config.train.independent and config.train.observation_mode == "egocentric":
         wrapper.enable_agent_id()
-        print(f"Independent: True (agent ID appended to obs)")
+        ind_heads = config.train.independent_heads
+        print(f"Independent: True (agent ID appended to obs, per-agent heads={ind_heads})")
 
     use_ego = config.train.observation_mode == "egocentric"
     policy = build_policy(config, wrapper)
@@ -308,8 +233,14 @@ def _train(
     print(f"Obs mode:    {'egocentric' if use_ego else 'global (per-agent heads)'}")
     print(f"Obs dim:     {wrapper.obs_dim}")
     if config.env.action_type == "discrete":
-        print(f"Num actions: {wrapper.num_actions} "
-              f"({config.env.num_location_bins} loc × {config.env.num_price_bins} price)")
+        n_loc = config.env.num_location_bins
+        n_price = config.env.num_price_bins
+        if config.env.dimensions == 2:
+            total = n_loc * n_loc * n_price
+            print(f"Num actions: {total} ({n_loc} loc_x × {n_loc} loc_y × {n_price} price)")
+        else:
+            total = n_loc * n_price
+            print(f"Num actions: {total} ({n_loc} loc × {n_price} price)")
     else:
         print(f"Action dim:  {wrapper.action_dim}")
     print(f"Num agents:  {wrapper.num_agents}")
@@ -362,8 +293,9 @@ def _train(
     if exploit_interval > 0:
         print(f"Exploitability check every {exploit_interval} steps ({exploit_br_updates} BR updates)")
 
-    # ── JSONL eval logger ─────────────────────────────────────────────
+    # ── JSONL loggers ────────────────────────────────────────────────
     eval_log = EvalLog(logger.experiment_dir / "eval_metrics.jsonl")
+    train_log = EvalLog(logger.experiment_dir / "train_metrics.jsonl")
 
     # ── training loop ─────────────────────────────────────────────────
     total_timesteps = 0
@@ -416,6 +348,7 @@ def _train(
                 if temperature is not None:
                     metrics["temperature"] = temperature
                 logger.log_metrics(metrics, prefix="train")
+                train_log.write(update, metrics)
 
                 print_metrics: dict[str, float] = {
                     "reward": rollout_stats["mean_reward"],
@@ -441,6 +374,9 @@ def _train(
                         temperature=config.train.buyer_choice_temp_end if use_temp_anneal else None,
                         is_discrete=config.env.action_type == "discrete",
                         is_factored=config.env.action_type == "discrete",
+                        is_2d_factored=(config.env.action_type == "discrete"
+                                        and config.env.dimensions == 2
+                                        and config.train.obs_type == "conv_bin"),
                     )
                 else:
                     eval_stats = evaluate_policy(
@@ -522,6 +458,9 @@ def _train(
             temperature=config.train.buyer_choice_temp_end if use_temp_anneal else None,
             is_discrete=config.env.action_type == "discrete",
             is_factored=config.env.action_type == "discrete",
+            is_2d_factored=(config.env.action_type == "discrete"
+                            and config.env.dimensions == 2
+                            and config.train.obs_type == "conv_bin"),
         )
     else:
         final_eval = evaluate_policy(
@@ -545,6 +484,7 @@ def _train(
               f"price={final_eval[f'eval_price_agent_{a}']:.2f} "
               f"share={final_eval[f'eval_market_share_agent_{a}']:.1%}")
 
+    train_log.close()
     eval_log.close()
     logger.close()
 

@@ -452,7 +452,9 @@ class AsymmetricPSROLoop:
         patience = cfg.psro.br_patience
         delta = cfg.psro.br_early_stop_delta
         use_early_stop = patience > 0
-        best_reward = -float("inf")
+        _es_window = max(patience // 2, 5)
+        _es_history: list[float] = []
+        best_rolling_mean = -float("inf")
         stale_count = 0
         final_update = num_updates
 
@@ -502,23 +504,31 @@ class AsymmetricPSROLoop:
                 )
 
                 if use_early_stop:
-                    if mean_rew > best_reward + delta:
-                        best_reward = mean_rew
-                        stale_count = 0
-                    else:
-                        stale_count += 1
-                    if stale_count >= patience:
-                        print(
-                            f"    ✓ P{player} BR converged "
-                            f"(best: {best_reward:.4f})"
-                        )
-                        final_update = update
-                        break
+                    _es_history.append(mean_rew)
+                    if len(_es_history) >= _es_window:
+                        rolling = sum(_es_history[-_es_window:]) / _es_window
+                        if rolling > best_rolling_mean + delta:
+                            best_rolling_mean = rolling
+                            stale_count = 0
+                        else:
+                            stale_count += 1
+                        if stale_count >= patience:
+                            print(
+                                f"    ✓ P{player} BR converged "
+                                f"(rolling mean {rolling:.2f} stable "
+                                f"for {patience} windows)"
+                            )
+                            final_update = update
+                            break
 
         if final_update == num_updates and use_early_stop:
+            rolling = (
+                sum(_es_history[-_es_window:]) / min(len(_es_history), _es_window)
+                if _es_history else 0.0
+            )
             print(
-                f"    ⚠ P{player} BR hit max updates "
-                f"(best: {best_reward:.4f})"
+                f"    ⚠ P{player} BR hit max updates. "
+                f"Rolling mean: {rolling:.2f}"
             )
 
         return trainer.params

@@ -1,0 +1,7 @@
+# 2D discrete + 3 sellers (uniform buyers)
+
+_parent: hotelling_2d_discrete.yaml
+
+num_sellers: 3
+max_buyers: 300
+new_buyers_per_step: 300

@@ -23,23 +23,7 @@ import jax
 import numpy as np
 
 from spatial_competition_jax.marl.config import Config
-from spatial_competition_jax.marl.mappo.networks import (
-    DiscreteActorCritic,
-    EgoActorCritic,
-    EgoConv1dFactoredDiscreteActorCritic,
-    EgoConv2dActorCritic,
-    EgoDiscreteActorCritic,
-    EgoFactoredDiscreteActorCritic,
-    SharedActorCritic,
-)
-from spatial_competition_jax.marl.mappo.policy import (
-    ContinuousPolicy,
-    DiscretePolicy,
-    EgoContinuousPolicy,
-    EgoDiscretePolicy,
-    EgoFactoredDiscretePolicy,
-    PolicyAdapter,
-)
+from spatial_competition_jax.marl.policy_builder import build_policy
 from spatial_competition_jax.marl.training_wrapper import TrainingWrapper
 from spatial_competition_jax.marl.utils.checkpoints import load_checkpoint
 from spatial_competition_jax.marl.utils.device import resolve_device
@@ -125,89 +109,6 @@ def build_wrapper(config: Config) -> TrainingWrapper:
         buyer_dist_stds=config.env.buyer_dist_stds,
         buyer_dist_weights=config.env.buyer_dist_weights,
     )
-
-
-def build_policy(config: Config, wrapper: TrainingWrapper) -> PolicyAdapter:
-    """Build the appropriate PolicyAdapter from config.
-
-    Handles all combos: {global, egocentric} × {continuous, discrete}
-    and the Conv1D variant when ``obs_type == "conv_bin"``.
-    """
-    from typing import Any
-
-    hidden_dims = tuple(config.train.hidden_dims)
-    ego = config.train.observation_mode == "egocentric"
-    discrete = config.env.action_type == "discrete"
-    conv_bin = config.train.obs_type == "conv_bin"
-
-    ind_heads = config.train.independent_heads and config.train.independent
-
-    net: Any  # Flax module — concrete type varies by branch
-
-    if ego and discrete and conv_bin:
-        scalar_dim = wrapper.dimensions + 1
-        if wrapper.include_quality:
-            scalar_dim += 1
-        net = EgoConv1dFactoredDiscreteActorCritic(
-            num_location_bins=wrapper.num_location_bins,
-            num_price_bins=wrapper.num_price_bins,
-            spatial_resolution=wrapper.space_resolution,
-            num_grid_channels=wrapper._conv_grid_channels,
-            num_scalar_features=scalar_dim,
-            mlp_hidden_dims=hidden_dims,
-            independent_heads=ind_heads,
-            num_agents=wrapper.num_agents,
-        )
-        return EgoFactoredDiscretePolicy(net, num_agents=wrapper.num_agents)
-
-    if ego and not discrete and conv_bin:
-        gp = wrapper.space_resolution + 1
-        scalar_dim = wrapper.dimensions + 1
-        if wrapper.include_quality:
-            scalar_dim += 1
-        net = EgoConv2dActorCritic(
-            movement_dim=wrapper.movement_dim,
-            bounded_dim=wrapper.bounded_dim,
-            spatial_resolution=gp,
-            num_grid_channels=wrapper._conv_grid_channels,
-            num_scalar_features=scalar_dim,
-            mlp_hidden_dims=hidden_dims,
-            independent_heads=ind_heads,
-            num_agents=wrapper.num_agents,
-        )
-        return EgoContinuousPolicy(net, num_agents=wrapper.num_agents)
-
-    if ego and discrete:
-        net = EgoFactoredDiscreteActorCritic(
-            num_location_bins=wrapper.num_location_bins,
-            num_price_bins=wrapper.num_price_bins,
-            hidden_dims=hidden_dims,
-        )
-        return EgoFactoredDiscretePolicy(net, num_agents=wrapper.num_agents)
-
-    if ego:
-        net = EgoActorCritic(
-            movement_dim=wrapper.movement_dim,
-            bounded_dim=wrapper.bounded_dim,
-            hidden_dims=hidden_dims,
-        )
-        return EgoContinuousPolicy(net, num_agents=wrapper.num_agents)
-
-    if discrete:
-        net = DiscreteActorCritic(
-            num_actions=wrapper.num_actions,
-            num_agents=wrapper.num_agents,
-            hidden_dims=hidden_dims,
-        )
-        return DiscretePolicy(net)
-
-    net = SharedActorCritic(
-        movement_dim=wrapper.movement_dim,
-        bounded_dim=wrapper.bounded_dim,
-        num_agents=wrapper.num_agents,
-        hidden_dims=hidden_dims,
-    )
-    return ContinuousPolicy(net)
 
 
 def main() -> None:

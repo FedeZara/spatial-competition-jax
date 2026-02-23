@@ -1,0 +1,9 @@
+# 2D discrete + Gaussian buyer cluster at centre
+
+_parent: hotelling_2d_discrete.yaml
+
+buyer_distribution: gaussian
+buyer_dist_means:
+  - [0.5, 0.5]
+buyer_dist_stds:
+  - 0.15

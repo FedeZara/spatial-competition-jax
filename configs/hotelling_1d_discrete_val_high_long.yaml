@@ -1,0 +1,5 @@
+# High reservation price — extended training (1M updates)
+
+_parent: hotelling_1d_discrete_val_high.yaml
+
+total_updates: 1000000

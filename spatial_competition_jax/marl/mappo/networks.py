@@ -1328,3 +1328,131 @@ class EgoConv1dFactoredDiscreteActorCritic(nn.Module):
             price_logits.astype(jnp.float32),
             value.astype(jnp.float32),
         )
+
+
+# ---------------------------------------------------------------------------
+# Conv2D Factored Discrete Actor-Critic (2-D spatial, 3-way factored)
+# ---------------------------------------------------------------------------
+
+
+class EgoConv2dFactoredDiscreteActorCritic(nn.Module):
+    """Conv2D + 3-way factored discrete heads: loc_x × loc_y × price.
+
+    Same Conv2D backbone as :class:`EgoConv2dActorCritic`.
+    Returns ``(loc_x_logits, loc_y_logits, price_logits, value)``.
+    """
+
+    num_location_bins: int = 11
+    num_price_bins: int = 11
+    spatial_resolution: int = 51
+    num_grid_channels: int = 4
+    num_scalar_features: int = 3
+    conv_features: Sequence[int] = (32, 64, 128)
+    conv_kernel_sizes: Sequence[int] = (5, 3, 3)
+    conv_strides: Sequence[int] = (2, 2, 2)
+    mlp_hidden_dims: Sequence[int] = (256, 256)
+    independent_heads: bool = False
+    num_agents: int = 2
+    dtype: Dtype = jnp.bfloat16
+    param_dtype: Dtype = jnp.float32
+
+    @property
+    def num_actions(self) -> int:
+        return self.num_location_bins ** 2 * self.num_price_bins
+
+    @nn.compact
+    def __call__(
+        self, obs: jnp.ndarray,
+    ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+        R = self.spatial_resolution
+        C = self.num_grid_channels
+        grid_size = C * R * R
+
+        grid_flat = obs[..., :grid_size]
+        scalars = obs[..., grid_size:]
+        batch_shape = grid_flat.shape[:-1]
+        grid = grid_flat.reshape(*batch_shape, C, R, R)
+        grid = jnp.moveaxis(grid, -3, -1)
+        x = grid.astype(self.dtype)
+
+        for i, (feats, ks, stride) in enumerate(
+            zip(self.conv_features, self.conv_kernel_sizes, self.conv_strides),
+        ):
+            x = nn.Conv(
+                features=feats, kernel_size=(ks, ks), strides=(stride, stride),
+                padding="SAME", dtype=self.dtype, param_dtype=self.param_dtype,
+                kernel_init=orthogonal(jnp.sqrt(2)), name=f"conv_{i}",
+            )(x)
+            x = nn.relu(x)
+
+        x = x.mean(axis=(-3, -2))  # GlobalAvgPool
+        x = jnp.concatenate([x, scalars.astype(self.dtype)], axis=-1)
+
+        for i, dim in enumerate(self.mlp_hidden_dims):
+            x = nn.Dense(
+                dim, dtype=self.dtype, param_dtype=self.param_dtype,
+                kernel_init=orthogonal(jnp.sqrt(2)), name=f"mlp_{i}",
+            )(x)
+            x = nn.relu(x)
+        features = x
+
+        def _head(name: str, dim: int) -> jnp.ndarray:
+            return nn.Dense(
+                dim, dtype=self.dtype, param_dtype=self.param_dtype,
+                kernel_init=orthogonal(0.01), name=name,
+            )(features)
+
+        if self.independent_heads:
+            A = self.num_agents
+            aid = obs[..., -A:].astype(self.dtype)
+
+            def _pa(base: str, dim: int) -> jnp.ndarray:
+                st = jnp.stack([
+                    nn.Dense(dim, dtype=self.dtype, param_dtype=self.param_dtype,
+                             kernel_init=orthogonal(0.01), name=f"{base}_{a}")(features)
+                    for a in range(A)
+                ], axis=-2)
+                return jnp.einsum("...a,...ab->...b", aid, st)
+
+            lx = _pa("loc_x", self.num_location_bins)
+            ly = _pa("loc_y", self.num_location_bins)
+            pr = _pa("price", self.num_price_bins)
+        else:
+            lx = _head("loc_x", self.num_location_bins)
+            ly = _head("loc_y", self.num_location_bins)
+            pr = _head("price", self.num_price_bins)
+
+        val = nn.Dense(
+            1, dtype=self.dtype, param_dtype=self.param_dtype,
+            kernel_init=orthogonal(1.0), name="critic",
+        )(features).squeeze(-1)
+
+        return lx.astype(jnp.float32), ly.astype(jnp.float32), pr.astype(jnp.float32), val.astype(jnp.float32)
+
+
+def ego_2d_factored_discrete_sample(
+    network: EgoConv2dFactoredDiscreteActorCritic,
+    params: dict, obs: jnp.ndarray, key: jnp.ndarray,
+) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+    lx_lg, ly_lg, p_lg, v_sym = network.apply(params, obs)  # type: ignore[misc]
+    values = symexp(v_sym)
+    n_l, n_p = network.num_location_bins, network.num_price_bins
+    k_x, k_y, k_p = jax.random.split(key, 3)
+    lx = jax.random.categorical(k_x, lx_lg.reshape(-1, n_l)).reshape(lx_lg.shape[:-1])
+    ly = jax.random.categorical(k_y, ly_lg.reshape(-1, n_l)).reshape(ly_lg.shape[:-1])
+    pi = jax.random.categorical(k_p, p_lg.reshape(-1, n_p)).reshape(p_lg.shape[:-1])
+    joint = lx * (n_l * n_p) + ly * n_p + pi
+    lp = _categorical_log_prob(lx_lg, lx) + _categorical_log_prob(ly_lg, ly) + _categorical_log_prob(p_lg, pi)
+    return joint[..., None].astype(jnp.float32), lp, values
+
+
+def ego_2d_factored_discrete_deterministic(
+    network: EgoConv2dFactoredDiscreteActorCritic,
+    params: dict, obs: jnp.ndarray,
+) -> tuple[jnp.ndarray, jnp.ndarray]:
+    lx_lg, ly_lg, p_lg, v_sym = network.apply(params, obs)  # type: ignore[misc]
+    values = symexp(v_sym)
+    n_l, n_p = network.num_location_bins, network.num_price_bins
+    lx, ly, pi = jnp.argmax(lx_lg, -1), jnp.argmax(ly_lg, -1), jnp.argmax(p_lg, -1)
+    joint = lx * (n_l * n_p) + ly * n_p + pi
+    return joint[..., None].astype(jnp.float32), values

@@ -342,12 +342,17 @@ class PSROLoop:
         log_interval = cfg.psro.psro_log_interval
 
         # ── Early stopping state ──────────────────────────────────────
+        # Uses a rolling mean over recent log windows.  Converged when
+        # the rolling mean hasn't improved by more than `delta` for
+        # `patience` consecutive windows.
         patience = cfg.psro.br_patience
         delta = cfg.psro.br_early_stop_delta
         use_early_stop = patience > 0
-        best_reward = -float("inf")
-        stale_count = 0  # consecutive log windows without improvement
-        final_update = num_updates  # track actual stopping point
+        _es_window = max(patience // 2, 5)  # rolling window size
+        _es_history: list[float] = []
+        best_rolling_mean = -float("inf")
+        stale_count = 0
+        final_update = num_updates
 
         for update in range(1, num_updates + 1):
             # Annealing
@@ -406,28 +411,34 @@ class PSROLoop:
                     f"ec: {ent_c:.4f}"
                 )
 
-                # ── Early stopping check ──────────────────────────────
+                # ── Early stopping check (rolling mean) ────────────────
                 if use_early_stop:
-                    if mean_rew > best_reward + delta:
-                        best_reward = mean_rew
-                        stale_count = 0
-                    else:
-                        stale_count += 1
+                    _es_history.append(mean_rew)
+                    if len(_es_history) >= _es_window:
+                        rolling = sum(_es_history[-_es_window:]) / _es_window
+                        if rolling > best_rolling_mean + delta:
+                            best_rolling_mean = rolling
+                            stale_count = 0
+                        else:
+                            stale_count += 1
 
-                    if stale_count >= patience:
-                        print(
-                            f"    ✓ BR converged (no improvement > {delta} "
-                            f"for {patience} windows = "
-                            f"{patience * log_interval} updates). "
-                            f"Best reward: {best_reward:.4f}"
-                        )
-                        final_update = update
-                        break
+                        if stale_count >= patience:
+                            print(
+                                f"    ✓ BR converged (rolling mean {rolling:.2f} "
+                                f"stable for {patience} windows = "
+                                f"{patience * log_interval} updates)"
+                            )
+                            final_update = update
+                            break
 
         if final_update == num_updates and use_early_stop:
+            rolling = (
+                sum(_es_history[-_es_window:]) / min(len(_es_history), _es_window)
+                if _es_history else 0.0
+            )
             print(
-                f"    ⚠ BR hit max updates ({num_updates}) without "
-                f"converging. Best reward: {best_reward:.4f}"
+                f"    ⚠ BR hit max updates ({num_updates}). "
+                f"Rolling mean: {rolling:.2f}"
             )
 
         return trainer.params

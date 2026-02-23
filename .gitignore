@@ -208,3 +208,6 @@ __marimo__/
 
 # Training results
 results/
+
+# Disposable scripts
+scripts/disposable/*

@@ -1,0 +1,11 @@
+# 2D discrete + Gaussian mixture buyers (two opposite corners)
+
+_parent: hotelling_2d_discrete.yaml
+
+buyer_distribution: mixture
+buyer_dist_means:
+  - [0.25, 0.25]
+  - [0.75, 0.75]
+buyer_dist_stds:
+  - 0.12
+  - 0.12

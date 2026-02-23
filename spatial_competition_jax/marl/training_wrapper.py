@@ -564,16 +564,10 @@ class TrainingWrapper:
     ) -> dict[str, jnp.ndarray]:
         """Map discrete action indices to the env action dict.
 
-        Each action is a joint index in ``[0, num_location_bins * num_price_bins)``.
-        Decodes into ``(loc_bin, price_bin)`` and converts to
-        absolute position / price.
+        Supports both 1D and 2D:
 
-        Location bin *i* maps directly to grid position *i* (no
-        rounding to bin centre).  With ``num_location_bins == space_resolution + 1``
-        this gives exact 1-to-1 coverage.
-
-        Movement is computed as the delta from the current position to
-        the target grid position.
+        - **1D**: joint index ``loc * num_price_bins + price``
+        - **2D**: joint index ``loc_x * (num_loc * num_price) + loc_y * num_price + price``
 
         Args:
             actions: ``(num_agents, 1)`` float32 bin indices.
@@ -583,25 +577,45 @@ class TrainingWrapper:
             Dict with ``'movement'``, ``'price'``.
         """
         idx = actions[:, 0].astype(jnp.int32)  # (A,)
-        loc_bin = idx // self.num_price_bins
-        price_bin = idx % self.num_price_bins
-
-        # Target position: bin i maps to grid position i * (res / n_loc)
         n_loc = self.num_location_bins
-        target_pos = (
-            loc_bin.astype(jnp.float32)
-            / jnp.maximum(n_loc - 1, 1)
-            * self.space_resolution
-        ).astype(jnp.int32)
-        target_pos = jnp.clip(target_pos, 0, self.space_resolution)
-
-        # Movement delta (in normalised [0, 1] coords)
-        current_norm = seller_positions.astype(jnp.float32) / self.space_resolution
-        target_norm = target_pos[:, None].astype(jnp.float32) / self.space_resolution
-        movement = target_norm - current_norm  # (A, D)
-
-        # Price: evenly spaced bins in [0, max_price]
         n_price = self.num_price_bins
+
+        if self.dimensions == 1:
+            loc_bin = idx // n_price
+            price_bin = idx % n_price
+
+            target_pos = (
+                loc_bin.astype(jnp.float32) / jnp.maximum(n_loc - 1, 1)
+                * self.space_resolution
+            ).astype(jnp.int32)
+            target_pos = jnp.clip(target_pos, 0, self.space_resolution)
+
+            current_norm = seller_positions.astype(jnp.float32) / self.space_resolution
+            target_norm = target_pos[:, None].astype(jnp.float32) / self.space_resolution
+            movement = target_norm - current_norm  # (A, 1)
+        else:
+            # 2D: 3-way factored: loc_x * (n_loc * n_price) + loc_y * n_price + price
+            loc_x_bin = idx // (n_loc * n_price)
+            remainder = idx % (n_loc * n_price)
+            loc_y_bin = remainder // n_price
+            price_bin = remainder % n_price
+
+            target_x = (
+                loc_x_bin.astype(jnp.float32) / jnp.maximum(n_loc - 1, 1)
+                * self.space_resolution
+            ).astype(jnp.int32)
+            target_y = (
+                loc_y_bin.astype(jnp.float32) / jnp.maximum(n_loc - 1, 1)
+                * self.space_resolution
+            ).astype(jnp.int32)
+            target_x = jnp.clip(target_x, 0, self.space_resolution)
+            target_y = jnp.clip(target_y, 0, self.space_resolution)
+            target_pos_2d = jnp.stack([target_x, target_y], axis=-1)  # (A, 2)
+
+            current_norm = seller_positions.astype(jnp.float32) / self.space_resolution
+            target_norm = target_pos_2d.astype(jnp.float32) / self.space_resolution
+            movement = target_norm - current_norm  # (A, 2)
+
         price = (
             price_bin.astype(jnp.float32) / jnp.maximum(n_price - 1, 1)
         ) * self.max_price

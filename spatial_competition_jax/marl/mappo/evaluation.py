@@ -11,6 +11,8 @@ import jax.numpy as jnp
 from spatial_competition_jax.marl.mappo.networks import (
     EgoActorCritic,
     EgoDiscreteActorCritic,
+    ego_2d_factored_discrete_deterministic,
+    ego_2d_factored_discrete_sample,
     ego_deterministic_actions,
     ego_discrete_deterministic,
     ego_discrete_sample,
@@ -130,7 +132,7 @@ def evaluate_policy(
 # ---------------------------------------------------------------------------
 
 
-@functools.partial(jax.jit, static_argnums=(0, 1, 4, 5, 6, 7))
+@functools.partial(jax.jit, static_argnums=(0, 1, 4, 5, 6, 7, 8))
 def _eval_ego_episodes_jit(
     network: EgoActorCritic | EgoDiscreteActorCritic,
     wrapper: TrainingWrapper,
@@ -140,6 +142,7 @@ def _eval_ego_episodes_jit(
     use_temp: bool,
     is_discrete: bool,
     is_factored: bool,
+    is_2d_factored: bool,
     temperature: jnp.ndarray,
 ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """Egocentric evaluation with per-agent sales tracking."""
@@ -156,7 +159,12 @@ def _eval_ego_episodes_jit(
             env_state, obs_all, sk = carry
             sk, action_key = jax.random.split(sk)
 
-            if is_discrete and is_factored:
+            if is_2d_factored:
+                if deterministic:
+                    actions, _ = ego_2d_factored_discrete_deterministic(network, params, obs_all)  # type: ignore[arg-type]
+                else:
+                    actions, _, _ = ego_2d_factored_discrete_sample(network, params, obs_all, action_key)  # type: ignore[arg-type]
+            elif is_discrete and is_factored:
                 if deterministic:
                     actions, _ = ego_factored_discrete_deterministic(network, params, obs_all)  # type: ignore[arg-type]
                 else:
@@ -212,6 +220,7 @@ def evaluate_ego_policy(
     temperature: float | None = None,
     is_discrete: bool = False,
     is_factored: bool = False,
+    is_2d_factored: bool = False,
 ) -> dict[str, float]:
     """Evaluate a trained egocentric policy with rich per-agent metrics."""
     if key is None:
@@ -222,7 +231,8 @@ def evaluate_ego_policy(
     keys = jax.random.split(key, num_episodes)
 
     total_rewards, all_positions, all_prices, total_sales = _eval_ego_episodes_jit(
-        network, wrapper, params, keys, deterministic, use_temp, is_discrete, is_factored, temp_arr,
+        network, wrapper, params, keys, deterministic, use_temp,
+        is_discrete, is_factored, is_2d_factored, temp_arr,
     )
 
     return _build_eval_results(total_rewards, all_positions, all_prices, total_sales, wrapper)

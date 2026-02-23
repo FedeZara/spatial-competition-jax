@@ -6,7 +6,7 @@
 #   Scalars: own_position, own_price
 #
 # For R=10: obs_dim = 4×(10+1) + 2 = 46
-# Conv1D(32,k=3)×2 → Flatten → Concat(2) → MLP(128,128) → Heads
+# Conv1D(16,k=3) → Flatten → Concat(2) → MLP(128,128) → Heads
 
 _parent: default.yaml
 

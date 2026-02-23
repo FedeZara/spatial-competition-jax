@@ -407,6 +407,13 @@ class SpatialCompetitionRenderer:
         self._clock.tick(60)  # 60 FPS for smooth interaction
         return True
 
+    def capture_frame(self) -> np.ndarray:
+        """Capture the current Pygame surface as an RGB numpy array (H, W, 3)."""
+        if self._screen is None:
+            raise RuntimeError("Renderer not initialized; call render() first")
+        # pygame.surfarray gives (W, H, 3) — transpose to (H, W, 3)
+        return np.transpose(pygame.surfarray.array3d(self._screen), (1, 0, 2)).copy()
+
     def render_and_wait(
         self,
         state: EnvState,
@@ -447,6 +454,60 @@ class SpatialCompetitionRenderer:
             remaining = adjusted_delay - elapsed
             time.sleep(min(0.016, remaining))  # ~60fps or remaining time
         return True
+
+    def step_and_render(
+        self,
+        key: "jnp.ndarray",
+        state: "EnvState",
+        actions: dict[str, "jnp.ndarray"],
+        base_delay: float,
+        current_step: int = 0,
+        cumulative_rewards: dict[str, float] | None = None,
+        record_phase_frames: list[np.ndarray] | None = None,
+    ) -> tuple["EnvState", "jnp.ndarray", "jnp.ndarray", bool]:
+        """Step through all 4 env phases, rendering after each one.
+
+        When *record_phase_frames* is provided, a screenshot is captured and
+        appended after each phase (4 frames per step).
+
+        Returns ``(new_state, rewards, dones, alive)`` where *alive* is
+        ``False`` when the window was closed.
+        """
+        import jax
+
+        env = self._env
+        k_spawn, k_sales = jax.random.split(key)
+        kw = dict(current_step=current_step, cumulative_rewards=cumulative_rewards)
+
+        # Phase 1 – remove previous buyers
+        state = env.step_remove_purchased(state)
+        if not self.render_and_wait(state, base_delay, **kw):
+            return state, None, None, False  # type: ignore[return-value]
+        if record_phase_frames is not None:
+            record_phase_frames.append(self.capture_frame())
+
+        # Phase 2 – spawn new buyers
+        state = env.step_spawn_buyers(k_spawn, state)
+        if not self.render_and_wait(state, base_delay, **kw):
+            return state, None, None, False  # type: ignore[return-value]
+        if record_phase_frames is not None:
+            record_phase_frames.append(self.capture_frame())
+
+        # Phase 3 – apply seller actions
+        state = env.step_apply_actions(state, actions)
+        if not self.render_and_wait(state, base_delay, **kw):
+            return state, None, None, False  # type: ignore[return-value]
+        if record_phase_frames is not None:
+            record_phase_frames.append(self.capture_frame())
+
+        # Phase 4 – process sales
+        obs, state, rewards, dones, info = env.step_process_sales(k_sales, state)
+        if not self.render_and_wait(state, base_delay, **kw):
+            return state, rewards, dones, False
+        if record_phase_frames is not None:
+            record_phase_frames.append(self.capture_frame())
+
+        return state, rewards, dones, True
 
     # ------------------------------------------------------------------
     # Drawing helpers

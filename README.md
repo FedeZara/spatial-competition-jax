@@ -473,6 +473,21 @@ The meta-game is solved via Projected Replicator Dynamics (PRD). Exploitability 
 
 ## Visualisation
 
+### Live Demo (No Checkpoint)
+
+Run a live demo with random agents—no trained checkpoint required:
+
+```bash
+# Watch the simulation
+python scripts/demo.py
+
+# Record a GIF (captures all 4 phases per step)
+python scripts/demo.py --record
+
+# 1D demo, light mode, or custom parameters
+python scripts/demo.py --dimensions 1 --light --sellers 4 --steps 120
+```
+
 ### Interactive Simulation
 
 Visualise trained agents with the Pygame renderer:
@@ -528,6 +543,7 @@ spatial-competition-jax/
 │           ├── device.py            # JAX device resolution
 │           └── logging.py           # TensorBoard + console logger
 ├── scripts/
+│   ├── demo.py                      # Live demo with random agents (no checkpoint)
 │   ├── train_hotelling.py           # MAPPO training entry point
 │   ├── run_psro.py                  # Symmetric PSRO entry point
 │   ├── run_psro_asymmetric.py       # Asymmetric PSRO entry point

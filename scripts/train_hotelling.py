@@ -214,6 +214,7 @@ def _train(
         action_type=config.env.action_type,
         num_location_bins=config.env.num_location_bins,
         num_price_bins=config.env.num_price_bins,
+        num_quality_bins=config.env.num_quality_bins,
         obs_type=config.train.obs_type,
         buyer_distribution=config.env.buyer_distribution,
         buyer_dist_means=config.env.buyer_dist_means,
@@ -235,12 +236,19 @@ def _train(
     if config.env.action_type == "discrete":
         n_loc = config.env.num_location_bins
         n_price = config.env.num_price_bins
+        n_q = wrapper.num_quality_bins  # 0 when quality disabled
         if config.env.dimensions == 2:
-            total = n_loc * n_loc * n_price
-            print(f"Num actions: {total} ({n_loc} loc_x × {n_loc} loc_y × {n_price} price)")
+            total = n_loc * n_loc * n_price * max(n_q, 1)
+            factors = f"{n_loc} loc_x × {n_loc} loc_y × {n_price} price"
+            if n_q > 0:
+                factors += f" × {n_q} quality"
+            print(f"Num actions: {total} ({factors})")
         else:
-            total = n_loc * n_price
-            print(f"Num actions: {total} ({n_loc} loc × {n_price} price)")
+            total = n_loc * n_price * max(n_q, 1)
+            factors = f"{n_loc} loc × {n_price} price"
+            if n_q > 0:
+                factors += f" × {n_q} quality"
+            print(f"Num actions: {total} ({factors})")
     else:
         print(f"Action dim:  {wrapper.action_dim}")
     print(f"Num agents:  {wrapper.num_agents}")

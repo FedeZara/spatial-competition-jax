@@ -507,6 +507,7 @@ def _build_wrapper(config: Config) -> TrainingWrapper:
         action_type=config.env.action_type,
         num_location_bins=config.env.num_location_bins,
         num_price_bins=config.env.num_price_bins,
+        num_quality_bins=config.env.num_quality_bins,
         obs_type=config.train.obs_type,
         buyer_distribution=config.env.buyer_distribution,
         buyer_dist_means=config.env.buyer_dist_means,
@@ -538,6 +539,7 @@ def _build_single_agent_policy(
         conv_net = EgoConv1dFactoredDiscreteActorCritic(
             num_location_bins=wrapper.num_location_bins,
             num_price_bins=wrapper.num_price_bins,
+            num_quality_bins=wrapper.num_quality_bins,
             spatial_resolution=wrapper.space_resolution,
             num_grid_channels=wrapper._conv_grid_channels,
             num_scalar_features=scalar_dim,
@@ -564,6 +566,7 @@ def _build_single_agent_policy(
         ego_fac_net = EgoFactoredDiscreteActorCritic(
             num_location_bins=wrapper.num_location_bins,
             num_price_bins=wrapper.num_price_bins,
+            num_quality_bins=wrapper.num_quality_bins,
             hidden_dims=hidden_dims,
         )
         return EgoFactoredDiscretePolicy(ego_fac_net, num_agents=1)

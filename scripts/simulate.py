@@ -108,6 +108,7 @@ def build_wrapper(config: Config) -> TrainingWrapper:
         action_type=config.env.action_type,
         num_location_bins=config.env.num_location_bins,
         num_price_bins=config.env.num_price_bins,
+        num_quality_bins=config.env.num_quality_bins,
         obs_type=config.train.obs_type,
         buyer_distribution=config.env.buyer_distribution,
         buyer_dist_means=config.env.buyer_dist_means,

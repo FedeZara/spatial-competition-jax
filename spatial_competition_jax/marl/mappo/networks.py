@@ -702,13 +702,16 @@ def _categorical_entropy(logits: jnp.ndarray) -> jnp.ndarray:
 
 
 class EgoFactoredDiscreteActorCritic(nn.Module):
-    """Egocentric Actor-Critic with *factored* location + price categoricals.
+    """Egocentric Actor-Critic with *factored* location + price (+ quality)
+    categoricals.
 
-    Instead of a single Categorical over ``num_location_bins * num_price_bins``
-    joint actions, this network produces **two independent** sets of logits:
+    Instead of a single Categorical over the joint action space, this
+    network produces **independent** sets of logits for each factor:
 
-    - ``loc_logits``   ``(..., num_location_bins)``
-    - ``price_logits`` ``(..., num_price_bins)``
+    - ``loc_logits``     ``(..., num_location_bins)``
+    - ``price_logits``   ``(..., num_price_bins)``
+    - ``quality_logits`` ``(..., num_quality_bins)``  *(only when
+      ``num_quality_bins > 0``)*
 
     Each dimension gets its own entropy bonus during PPO training, which
     prevents the common failure mode where the policy concentrates on
@@ -720,6 +723,7 @@ class EgoFactoredDiscreteActorCritic(nn.Module):
 
     num_location_bins: int
     num_price_bins: int
+    num_quality_bins: int = 0
     hidden_dims: Sequence[int] = (256, 256)
     dtype: Dtype = jnp.bfloat16
     param_dtype: Dtype = jnp.float32
@@ -727,22 +731,22 @@ class EgoFactoredDiscreteActorCritic(nn.Module):
     @property
     def num_actions(self) -> int:
         """Total joint action count (for compatibility)."""
-        return self.num_location_bins * self.num_price_bins
+        n = self.num_location_bins * self.num_price_bins
+        if self.num_quality_bins > 0:
+            n *= self.num_quality_bins
+        return n
 
     @nn.compact
-    def __call__(
-        self, obs: jnp.ndarray,
-    ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+    def __call__(self, obs: jnp.ndarray):
         """Forward pass.
 
         Args:
             obs: ``(..., obs_dim)`` — a single agent's observation.
 
         Returns:
-            ``(loc_logits, price_logits, value)`` with shapes:
-            - loc_logits:   ``(..., num_location_bins)``
-            - price_logits: ``(..., num_price_bins)``
-            - value:        ``(...,)``
+            ``(loc_logits, price_logits, value)`` when quality is
+            disabled, or ``(loc_logits, price_logits, quality_logits,
+            value)`` when ``num_quality_bins > 0``.
         """
         x = obs.astype(self.dtype)
 
@@ -781,6 +785,21 @@ class EgoFactoredDiscreteActorCritic(nn.Module):
             kernel_init=orthogonal(1.0),
             name="critic",
         )(features).squeeze(-1)
+
+        if self.num_quality_bins > 0:
+            quality_logits = nn.Dense(
+                self.num_quality_bins,
+                dtype=self.dtype,
+                param_dtype=self.param_dtype,
+                kernel_init=orthogonal(0.01),
+                name="quality_logits",
+            )(features)
+            return (
+                loc_logits.astype(jnp.float32),
+                price_logits.astype(jnp.float32),
+                quality_logits.astype(jnp.float32),
+                value.astype(jnp.float32),
+            )
 
         return (
             loc_logits.astype(jnp.float32),
@@ -848,29 +867,47 @@ def ego_factored_discrete_sample(
     obs: jnp.ndarray,
     key: jnp.ndarray,
 ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
-    """Sample factored discrete actions (location + price independently).
+    """Sample factored discrete actions (location + price [+ quality]).
 
     Returns:
         ``(actions, log_probs, values)`` with shapes
         ``(..., 1)``, ``(...,)``, ``(...,)``.
-        Actions are float32 joint indices ``loc * num_price_bins + price``.
     """
-    loc_logits, price_logits, v_sym = network.apply(params, obs)  # type: ignore[misc]
+    has_quality = network.num_quality_bins > 0
+    result = network.apply(params, obs)  # type: ignore[misc]
+
+    if has_quality:
+        loc_logits, price_logits, quality_logits, v_sym = result
+    else:
+        loc_logits, price_logits, v_sym = result
     values = symexp(v_sym)
 
-    k_l, k_p = jax.random.split(key)
+    n_p = network.num_price_bins
+    n_q = max(network.num_quality_bins, 1)
+
+    if has_quality:
+        k_l, k_p, k_q = jax.random.split(key, 3)
+    else:
+        k_l, k_p = jax.random.split(key)
 
     flat_loc = loc_logits.reshape(-1, network.num_location_bins)
     loc_idx = jax.random.categorical(k_l, flat_loc).reshape(loc_logits.shape[:-1])
 
-    flat_price = price_logits.reshape(-1, network.num_price_bins)
+    flat_price = price_logits.reshape(-1, n_p)
     price_idx = jax.random.categorical(k_p, flat_price).reshape(price_logits.shape[:-1])
 
-    joint_idx = loc_idx * network.num_price_bins + price_idx
     log_probs = (
         _categorical_log_prob(loc_logits, loc_idx)
         + _categorical_log_prob(price_logits, price_idx)
     )
+
+    if has_quality:
+        flat_qual = quality_logits.reshape(-1, network.num_quality_bins)
+        qual_idx = jax.random.categorical(k_q, flat_qual).reshape(quality_logits.shape[:-1])
+        joint_idx = loc_idx * (n_p * n_q) + price_idx * n_q + qual_idx
+        log_probs = log_probs + _categorical_log_prob(quality_logits, qual_idx)
+    else:
+        joint_idx = loc_idx * n_p + price_idx
 
     return joint_idx[..., None].astype(jnp.float32), log_probs, values
 
@@ -885,12 +922,26 @@ def ego_factored_discrete_deterministic(
     Returns:
         ``(actions, values)`` with shapes ``(..., 1)``, ``(...,)``.
     """
-    loc_logits, price_logits, v_sym = network.apply(params, obs)  # type: ignore[misc]
+    has_quality = network.num_quality_bins > 0
+    result = network.apply(params, obs)  # type: ignore[misc]
+
+    if has_quality:
+        loc_logits, price_logits, quality_logits, v_sym = result
+    else:
+        loc_logits, price_logits, v_sym = result
     values = symexp(v_sym)
+
+    n_p = network.num_price_bins
+    n_q = max(network.num_quality_bins, 1)
 
     loc_idx = jnp.argmax(loc_logits, axis=-1)
     price_idx = jnp.argmax(price_logits, axis=-1)
-    joint_idx = loc_idx * network.num_price_bins + price_idx
+
+    if has_quality:
+        qual_idx = jnp.argmax(quality_logits, axis=-1)
+        joint_idx = loc_idx * (n_p * n_q) + price_idx * n_q + qual_idx
+    else:
+        joint_idx = loc_idx * n_p + price_idx
 
     return joint_idx[..., None].astype(jnp.float32), values
 
@@ -1188,6 +1239,7 @@ class EgoConv1dFactoredDiscreteActorCritic(nn.Module):
     num_location_bins: int
     num_price_bins: int
     spatial_resolution: int
+    num_quality_bins: int = 0
     num_grid_channels: int = 4
     num_scalar_features: int = 2  # D + 1 (position + price); set at construction
     conv_features: Sequence[int] = (16,)
@@ -1201,12 +1253,13 @@ class EgoConv1dFactoredDiscreteActorCritic(nn.Module):
     @property
     def num_actions(self) -> int:
         """Total joint action count (for compatibility)."""
-        return self.num_location_bins * self.num_price_bins
+        n = self.num_location_bins * self.num_price_bins
+        if self.num_quality_bins > 0:
+            n *= self.num_quality_bins
+        return n
 
     @nn.compact
-    def __call__(
-        self, obs: jnp.ndarray,
-    ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+    def __call__(self, obs: jnp.ndarray):
         """Forward pass.
 
         Args:
@@ -1216,10 +1269,9 @@ class EgoConv1dFactoredDiscreteActorCritic(nn.Module):
                              (+ num_agents if independent)``.
 
         Returns:
-            ``(loc_logits, price_logits, value)`` with shapes:
-            - loc_logits:   ``(..., num_location_bins)``
-            - price_logits: ``(..., num_price_bins)``
-            - value:        ``(...,)``
+            ``(loc_logits, price_logits, value)`` or
+            ``(loc_logits, price_logits, quality_logits, value)``
+            when ``num_quality_bins > 0``.
         """
         R = self.spatial_resolution
         C = self.num_grid_channels
@@ -1270,49 +1322,39 @@ class EgoConv1dFactoredDiscreteActorCritic(nn.Module):
         features = x
 
         # ── Factored action heads ────────────────────────────────────
+        def _make_head(name: str, dim: int) -> jnp.ndarray:
+            return nn.Dense(
+                dim, dtype=self.dtype, param_dtype=self.param_dtype,
+                kernel_init=orthogonal(0.01), name=name,
+            )(features)
+
         if self.independent_heads:
             A = self.num_agents
             agent_id = obs[..., -A:].astype(self.dtype)  # (..., A)
 
-            stacked_loc = jnp.stack([
-                nn.Dense(
-                    self.num_location_bins,
-                    dtype=self.dtype,
-                    param_dtype=self.param_dtype,
-                    kernel_init=orthogonal(0.01),
-                    name=f"loc_logits_{a}",
-                )(features)
-                for a in range(A)
-            ], axis=-2)  # (..., A, num_location_bins)
-            loc_logits = jnp.einsum("...a,...ab->...b", agent_id, stacked_loc)
+            def _per_agent_head(base: str, dim: int) -> jnp.ndarray:
+                stacked = jnp.stack([
+                    nn.Dense(
+                        dim, dtype=self.dtype, param_dtype=self.param_dtype,
+                        kernel_init=orthogonal(0.01), name=f"{base}_{a}",
+                    )(features)
+                    for a in range(A)
+                ], axis=-2)
+                return jnp.einsum("...a,...ab->...b", agent_id, stacked)
 
-            stacked_price = jnp.stack([
-                nn.Dense(
-                    self.num_price_bins,
-                    dtype=self.dtype,
-                    param_dtype=self.param_dtype,
-                    kernel_init=orthogonal(0.01),
-                    name=f"price_logits_{a}",
-                )(features)
-                for a in range(A)
-            ], axis=-2)  # (..., A, num_price_bins)
-            price_logits = jnp.einsum("...a,...ab->...b", agent_id, stacked_price)
+            loc_logits = _per_agent_head("loc_logits", self.num_location_bins)
+            price_logits = _per_agent_head("price_logits", self.num_price_bins)
+            quality_logits = (
+                _per_agent_head("quality_logits", self.num_quality_bins)
+                if self.num_quality_bins > 0 else None
+            )
         else:
-            loc_logits = nn.Dense(
-                self.num_location_bins,
-                dtype=self.dtype,
-                param_dtype=self.param_dtype,
-                kernel_init=orthogonal(0.01),
-                name="loc_logits",
-            )(features)
-
-            price_logits = nn.Dense(
-                self.num_price_bins,
-                dtype=self.dtype,
-                param_dtype=self.param_dtype,
-                kernel_init=orthogonal(0.01),
-                name="price_logits",
-            )(features)
+            loc_logits = _make_head("loc_logits", self.num_location_bins)
+            price_logits = _make_head("price_logits", self.num_price_bins)
+            quality_logits = (
+                _make_head("quality_logits", self.num_quality_bins)
+                if self.num_quality_bins > 0 else None
+            )
 
         # ── Critic head (shared) ─────────────────────────────────────
         value = nn.Dense(
@@ -1322,6 +1364,14 @@ class EgoConv1dFactoredDiscreteActorCritic(nn.Module):
             kernel_init=orthogonal(1.0),
             name="critic",
         )(features).squeeze(-1)
+
+        if quality_logits is not None:
+            return (
+                loc_logits.astype(jnp.float32),
+                price_logits.astype(jnp.float32),
+                quality_logits.astype(jnp.float32),
+                value.astype(jnp.float32),
+            )
 
         return (
             loc_logits.astype(jnp.float32),
@@ -1336,14 +1386,17 @@ class EgoConv1dFactoredDiscreteActorCritic(nn.Module):
 
 
 class EgoConv2dFactoredDiscreteActorCritic(nn.Module):
-    """Conv2D + 3-way factored discrete heads: loc_x × loc_y × price.
+    """Conv2D + factored discrete heads: loc_x × loc_y × price (× quality).
 
     Same Conv2D backbone as :class:`EgoConv2dActorCritic`.
-    Returns ``(loc_x_logits, loc_y_logits, price_logits, value)``.
+    Returns ``(loc_x_logits, loc_y_logits, price_logits, value)`` or
+    ``(loc_x_logits, loc_y_logits, price_logits, quality_logits, value)``
+    when ``num_quality_bins > 0``.
     """
 
     num_location_bins: int = 11
     num_price_bins: int = 11
+    num_quality_bins: int = 0
     spatial_resolution: int = 51
     num_grid_channels: int = 4
     num_scalar_features: int = 3
@@ -1358,12 +1411,13 @@ class EgoConv2dFactoredDiscreteActorCritic(nn.Module):
 
     @property
     def num_actions(self) -> int:
-        return self.num_location_bins ** 2 * self.num_price_bins
+        n = self.num_location_bins ** 2 * self.num_price_bins
+        if self.num_quality_bins > 0:
+            n *= self.num_quality_bins
+        return n
 
     @nn.compact
-    def __call__(
-        self, obs: jnp.ndarray,
-    ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+    def __call__(self, obs: jnp.ndarray):
         R = self.spatial_resolution
         C = self.num_grid_channels
         grid_size = C * R * R
@@ -1417,15 +1471,24 @@ class EgoConv2dFactoredDiscreteActorCritic(nn.Module):
             lx = _pa("loc_x", self.num_location_bins)
             ly = _pa("loc_y", self.num_location_bins)
             pr = _pa("price", self.num_price_bins)
+            ql = _pa("quality", self.num_quality_bins) if self.num_quality_bins > 0 else None
         else:
             lx = _head("loc_x", self.num_location_bins)
             ly = _head("loc_y", self.num_location_bins)
             pr = _head("price", self.num_price_bins)
+            ql = _head("quality", self.num_quality_bins) if self.num_quality_bins > 0 else None
 
         val = nn.Dense(
             1, dtype=self.dtype, param_dtype=self.param_dtype,
             kernel_init=orthogonal(1.0), name="critic",
         )(features).squeeze(-1)
+
+        if ql is not None:
+            return (
+                lx.astype(jnp.float32), ly.astype(jnp.float32),
+                pr.astype(jnp.float32), ql.astype(jnp.float32),
+                val.astype(jnp.float32),
+            )
 
         return lx.astype(jnp.float32), ly.astype(jnp.float32), pr.astype(jnp.float32), val.astype(jnp.float32)
 
@@ -1434,15 +1497,38 @@ def ego_2d_factored_discrete_sample(
     network: EgoConv2dFactoredDiscreteActorCritic,
     params: dict, obs: jnp.ndarray, key: jnp.ndarray,
 ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
-    lx_lg, ly_lg, p_lg, v_sym = network.apply(params, obs)  # type: ignore[misc]
+    has_quality = network.num_quality_bins > 0
+    result = network.apply(params, obs)  # type: ignore[misc]
+
+    if has_quality:
+        lx_lg, ly_lg, p_lg, q_lg, v_sym = result
+    else:
+        lx_lg, ly_lg, p_lg, v_sym = result
     values = symexp(v_sym)
+
     n_l, n_p = network.num_location_bins, network.num_price_bins
-    k_x, k_y, k_p = jax.random.split(key, 3)
+    n_q = max(network.num_quality_bins, 1)
+
+    if has_quality:
+        k_x, k_y, k_p, k_q = jax.random.split(key, 4)
+    else:
+        k_x, k_y, k_p = jax.random.split(key, 3)
+
     lx = jax.random.categorical(k_x, lx_lg.reshape(-1, n_l)).reshape(lx_lg.shape[:-1])
     ly = jax.random.categorical(k_y, ly_lg.reshape(-1, n_l)).reshape(ly_lg.shape[:-1])
     pi = jax.random.categorical(k_p, p_lg.reshape(-1, n_p)).reshape(p_lg.shape[:-1])
-    joint = lx * (n_l * n_p) + ly * n_p + pi
-    lp = _categorical_log_prob(lx_lg, lx) + _categorical_log_prob(ly_lg, ly) + _categorical_log_prob(p_lg, pi)
+
+    lp = (_categorical_log_prob(lx_lg, lx)
+          + _categorical_log_prob(ly_lg, ly)
+          + _categorical_log_prob(p_lg, pi))
+
+    if has_quality:
+        qi = jax.random.categorical(k_q, q_lg.reshape(-1, n_q)).reshape(q_lg.shape[:-1])
+        joint = lx * (n_l * n_p * n_q) + ly * (n_p * n_q) + pi * n_q + qi
+        lp = lp + _categorical_log_prob(q_lg, qi)
+    else:
+        joint = lx * (n_l * n_p) + ly * n_p + pi
+
     return joint[..., None].astype(jnp.float32), lp, values
 
 
@@ -1450,9 +1536,24 @@ def ego_2d_factored_discrete_deterministic(
     network: EgoConv2dFactoredDiscreteActorCritic,
     params: dict, obs: jnp.ndarray,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
-    lx_lg, ly_lg, p_lg, v_sym = network.apply(params, obs)  # type: ignore[misc]
+    has_quality = network.num_quality_bins > 0
+    result = network.apply(params, obs)  # type: ignore[misc]
+
+    if has_quality:
+        lx_lg, ly_lg, p_lg, q_lg, v_sym = result
+    else:
+        lx_lg, ly_lg, p_lg, v_sym = result
     values = symexp(v_sym)
+
     n_l, n_p = network.num_location_bins, network.num_price_bins
+    n_q = max(network.num_quality_bins, 1)
+
     lx, ly, pi = jnp.argmax(lx_lg, -1), jnp.argmax(ly_lg, -1), jnp.argmax(p_lg, -1)
-    joint = lx * (n_l * n_p) + ly * n_p + pi
+
+    if has_quality:
+        qi = jnp.argmax(q_lg, -1)
+        joint = lx * (n_l * n_p * n_q) + ly * (n_p * n_q) + pi * n_q + qi
+    else:
+        joint = lx * (n_l * n_p) + ly * n_p + pi
+
     return joint[..., None].astype(jnp.float32), values

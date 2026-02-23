@@ -47,7 +47,7 @@ def build_policy(config: Config, wrapper: TrainingWrapper) -> PolicyAdapter:
 
     ind_heads = config.train.independent_heads and config.train.independent
 
-    # ── 2D discrete + conv_bin → 3-way factored (loc_x × loc_y × price)
+    # ── 2D discrete + conv_bin → factored (loc_x × loc_y × price [× quality])
     if ego and discrete and conv_bin and wrapper.dimensions == 2:
         gp = wrapper.space_resolution + 1
         scalar_dim = wrapper.dimensions + 1
@@ -56,6 +56,7 @@ def build_policy(config: Config, wrapper: TrainingWrapper) -> PolicyAdapter:
         net = EgoConv2dFactoredDiscreteActorCritic(
             num_location_bins=wrapper.num_location_bins,
             num_price_bins=wrapper.num_price_bins,
+            num_quality_bins=wrapper.num_quality_bins,
             spatial_resolution=gp,
             num_grid_channels=wrapper._conv_grid_channels,
             num_scalar_features=scalar_dim,
@@ -65,7 +66,7 @@ def build_policy(config: Config, wrapper: TrainingWrapper) -> PolicyAdapter:
         )
         return Ego2dFactoredDiscretePolicy(net, num_agents=wrapper.num_agents)
 
-    # ── 1D discrete + conv_bin → 2-way factored (loc × price)
+    # ── 1D discrete + conv_bin → factored (loc × price [× quality])
     if ego and discrete and conv_bin:
         scalar_dim = wrapper.dimensions + 1
         if wrapper.include_quality:
@@ -73,6 +74,7 @@ def build_policy(config: Config, wrapper: TrainingWrapper) -> PolicyAdapter:
         net = EgoConv1dFactoredDiscreteActorCritic(
             num_location_bins=wrapper.num_location_bins,
             num_price_bins=wrapper.num_price_bins,
+            num_quality_bins=wrapper.num_quality_bins,
             spatial_resolution=wrapper.space_resolution,
             num_grid_channels=wrapper._conv_grid_channels,
             num_scalar_features=scalar_dim,
@@ -105,6 +107,7 @@ def build_policy(config: Config, wrapper: TrainingWrapper) -> PolicyAdapter:
         net = EgoFactoredDiscreteActorCritic(
             num_location_bins=wrapper.num_location_bins,
             num_price_bins=wrapper.num_price_bins,
+            num_quality_bins=wrapper.num_quality_bins,
             hidden_dims=hidden_dims,
         )
         return EgoFactoredDiscretePolicy(net, num_agents=wrapper.num_agents)

@@ -38,6 +38,7 @@ class EnvConfig:
     action_type: str = "continuous"  # "continuous" or "discrete"
     num_location_bins: int = 11
     num_price_bins: int = 11
+    num_quality_bins: int = 11
 
     # Buyer position distribution
     # "uniform" (default), "gaussian" (single), or "mixture"

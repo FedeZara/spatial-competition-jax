@@ -104,6 +104,7 @@ class TrainingWrapper:
         action_type: str = "continuous",
         num_location_bins: int = 11,
         num_price_bins: int = 11,
+        num_quality_bins: int = 11,
         # Observation type: "blob" or "bin"
         obs_type: str = "blob",
         # Buyer distribution
@@ -168,7 +169,10 @@ class TrainingWrapper:
         self.action_type = action_type
         self.num_location_bins = num_location_bins
         self.num_price_bins = num_price_bins
-        self.num_actions = num_location_bins * num_price_bins  # joint categorical size
+        # Quality bins only matter when quality is enabled; otherwise 0
+        self.num_quality_bins = num_quality_bins if include_quality else 0
+        n_q = max(self.num_quality_bins, 1)  # treat 0 as 1 for joint size
+        self.num_actions = num_location_bins * num_price_bins * n_q
 
         # Observation type
         self.obs_type = obs_type
@@ -564,25 +568,32 @@ class TrainingWrapper:
     ) -> dict[str, jnp.ndarray]:
         """Map discrete action indices to the env action dict.
 
-        Supports both 1D and 2D:
+        Supports both 1D and 2D, with optional quality bins:
 
-        - **1D**: joint index ``loc * num_price_bins + price``
-        - **2D**: joint index ``loc_x * (num_loc * num_price) + loc_y * num_price + price``
+        - **1D**: ``loc * (n_price * n_q) + price * n_q + quality``
+        - **2D**: ``loc_x * (n_loc * n_price * n_q) + loc_y * (n_price * n_q)
+          + price * n_q + quality``
+
+        When quality is disabled (``num_quality_bins == 0``), ``n_q = 1``
+        and the quality term vanishes.
 
         Args:
             actions: ``(num_agents, 1)`` float32 bin indices.
             seller_positions: ``(num_agents, D)`` int32 current positions.
 
         Returns:
-            Dict with ``'movement'``, ``'price'``.
+            Dict with ``'movement'``, ``'price'``, (optionally ``'quality'``).
         """
         idx = actions[:, 0].astype(jnp.int32)  # (A,)
         n_loc = self.num_location_bins
         n_price = self.num_price_bins
+        n_q = max(self.num_quality_bins, 1)
 
         if self.dimensions == 1:
-            loc_bin = idx // n_price
-            price_bin = idx % n_price
+            loc_bin = idx // (n_price * n_q)
+            remainder = idx % (n_price * n_q)
+            price_bin = remainder // n_q
+            quality_bin = remainder % n_q
 
             target_pos = (
                 loc_bin.astype(jnp.float32) / jnp.maximum(n_loc - 1, 1)
@@ -594,11 +605,14 @@ class TrainingWrapper:
             target_norm = target_pos[:, None].astype(jnp.float32) / self.space_resolution
             movement = target_norm - current_norm  # (A, 1)
         else:
-            # 2D: 3-way factored: loc_x * (n_loc * n_price) + loc_y * n_price + price
-            loc_x_bin = idx // (n_loc * n_price)
-            remainder = idx % (n_loc * n_price)
-            loc_y_bin = remainder // n_price
-            price_bin = remainder % n_price
+            # 2D: loc_x * (n_loc * n_price * n_q) + loc_y * (n_price * n_q)
+            #     + price * n_q + quality
+            loc_x_bin = idx // (n_loc * n_price * n_q)
+            remainder1 = idx % (n_loc * n_price * n_q)
+            loc_y_bin = remainder1 // (n_price * n_q)
+            remainder2 = remainder1 % (n_price * n_q)
+            price_bin = remainder2 // n_q
+            quality_bin = remainder2 % n_q
 
             target_x = (
                 loc_x_bin.astype(jnp.float32) / jnp.maximum(n_loc - 1, 1)
@@ -620,7 +634,15 @@ class TrainingWrapper:
             price_bin.astype(jnp.float32) / jnp.maximum(n_price - 1, 1)
         ) * self.max_price
 
-        return {"movement": movement, "price": price}
+        result: dict[str, jnp.ndarray] = {"movement": movement, "price": price}
+
+        if self.num_quality_bins > 0:
+            quality = (
+                quality_bin.astype(jnp.float32) / jnp.maximum(n_q - 1, 1)
+            ) * self.max_quality
+            result["quality"] = quality
+
+        return result
 
     # ------------------------------------------------------------------
     # Reset / Step

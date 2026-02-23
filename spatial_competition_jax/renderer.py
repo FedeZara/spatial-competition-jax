@@ -39,12 +39,18 @@ class EntityInfo:
 class SpatialCompetitionRenderer:
     """Pygame renderer that reads from :class:`EnvState` arrays."""
 
-    def __init__(self, env: SpatialCompetitionEnv, max_env_steps: int | None = None) -> None:
+    def __init__(
+        self,
+        env: SpatialCompetitionEnv,
+        max_env_steps: int | None = None,
+        light_mode: bool = False,
+    ) -> None:
         if pygame is None:
             raise ImportError("pygame is required for rendering.  Install with:  pip install pygame")
 
         self._env = env
         self._max_env_steps = max_env_steps or env.max_env_steps
+        self._light_mode = light_mode
 
         # Pygame state (lazy init)
         self._pygame_initialized = False
@@ -89,16 +95,69 @@ class SpatialCompetitionRenderer:
     # Colour helpers
     # ------------------------------------------------------------------
 
+    @property
+    def _theme(self) -> dict[str, tuple[int, int, int]]:
+        """Color theme — dark or light."""
+        if self._light_mode:
+            return {
+                "bg":             (255, 255, 255),
+                "text":           (30, 30, 30),
+                "text_secondary": (80, 80, 80),
+                "text_muted":     (120, 120, 120),
+                "axis_line":      (60, 60, 60),
+                "grid_line":      (200, 200, 200),
+                "grid_bg":        (245, 245, 250),
+                "grid_border":    (120, 120, 140),
+                "tick_label":     (60, 60, 60),
+                "buyer_neutral":  (170, 170, 180),
+                "panel_bg":       (240, 240, 245),
+                "panel_border":   (180, 180, 190),
+                "button_bg":      (220, 220, 230),
+                "button_border":  (160, 160, 170),
+                "button_active":  (180, 220, 180),
+                "slider_bg":      (210, 210, 220),
+                "slider_handle":  (100, 100, 120),
+                "bar_bg":         (230, 230, 240),
+                "info_box_bg":    (245, 245, 250),
+                "highlight":      (0, 0, 0),
+                "speed_max":      (180, 120, 0),
+                "paused_text":    (180, 120, 0),
+            }
+        return {
+            "bg":             (30, 30, 40),
+            "text":           (200, 200, 200),
+            "text_secondary": (150, 150, 150),
+            "text_muted":     (120, 120, 140),
+            "axis_line":      (100, 100, 120),
+            "grid_line":      (60, 60, 75),
+            "grid_bg":        (40, 40, 55),
+            "grid_border":    (80, 80, 100),
+            "tick_label":     (150, 150, 150),
+            "buyer_neutral":  (80, 80, 90),
+            "panel_bg":       (45, 45, 60),
+            "panel_border":   (100, 100, 120),
+            "button_bg":      (60, 60, 80),
+            "button_border":  (100, 100, 120),
+            "button_active":  (80, 120, 80),
+            "slider_bg":      (50, 50, 65),
+            "slider_handle":  (120, 120, 150),
+            "bar_bg":         (40, 40, 55),
+            "info_box_bg":    (50, 50, 65),
+            "highlight":      (255, 255, 255),
+            "speed_max":      (255, 200, 100),
+            "paused_text":    (255, 200, 100),
+        }
+
     def _generate_seller_colors(self) -> list[tuple[int, int, int]]:
         """Generate distinct colors for each seller using HSV color space."""
         num_sellers = self._env.num_sellers
         colors: list[tuple[int, int, int]] = []
         for i in range(num_sellers):
             hue = (i * 360 / num_sellers) % 360 if num_sellers > 0 else 0
-            # Convert HSV to RGB (saturation=0.8, value=0.65 for darker colors)
+            # Convert HSV to RGB — brighter for light mode
             h = hue / 60
-            saturation = 0.8
-            value = 0.65
+            saturation = 0.85 if self._light_mode else 0.8
+            value = 0.75 if self._light_mode else 0.65
             c = value * saturation
             x = c * (1 - abs(h % 2 - 1))
             m = value - c
@@ -126,7 +185,7 @@ class SpatialCompetitionRenderer:
         assert self._cached_buyer_purchased_from is not None
         seller_idx = int(self._cached_buyer_purchased_from[buyer_idx])
         if seller_idx < 0:
-            return (80, 80, 90)  # Neutral gray for buyers who haven't purchased
+            return self._theme["buyer_neutral"]
         return self._seller_colors[seller_idx % len(self._seller_colors)]
 
     # ------------------------------------------------------------------
@@ -308,8 +367,7 @@ class SpatialCompetitionRenderer:
         self._seller_screen_positions = []
         self._buyer_screen_positions = []
 
-        # Clear screen with dark background
-        self._screen.fill((30, 30, 40))
+        self._screen.fill(self._theme["bg"])
         width, height = self._window_size
         margin = 60
 
@@ -399,23 +457,24 @@ class SpatialCompetitionRenderer:
         assert self._screen is not None and self._font is not None
         assert self._cached_buyer_valid is not None
 
+        t = self._theme
         # Step counter
-        step_text = self._font.render(f"Step: {current_step}/{self._max_env_steps}", True, (200, 200, 200))
+        step_text = self._font.render(f"Step: {current_step}/{self._max_env_steps}", True, t["text"])
         self._screen.blit(step_text, (10, 10))
 
         # Sellers and buyers count
         num_buyers = int(np.sum(self._cached_buyer_valid))
         counts_text = self._font.render(
-            f"Sellers: {self._env.num_sellers}  Buyers: {num_buyers}", True, (150, 150, 150)
+            f"Sellers: {self._env.num_sellers}  Buyers: {num_buyers}", True, t["text_secondary"]
         )
         self._screen.blit(counts_text, (10, 28))
 
         # Speed label and value
-        speed_label = self._font.render("Speed:", True, (150, 150, 150))
+        speed_label = self._font.render("Speed:", True, t["text_secondary"])
         if self._speed_multiplier == float("inf"):
-            speed_value = self._font.render("MAX", True, (255, 200, 100))
+            speed_value = self._font.render("MAX", True, t["speed_max"])
         else:
-            speed_value = self._font.render(f"{self._speed_multiplier:.1f}x", True, (200, 200, 200))
+            speed_value = self._font.render(f"{self._speed_multiplier:.1f}x", True, t["text"])
 
         # Position elements from right edge
         button_width, button_height = 70, 25
@@ -425,11 +484,11 @@ class SpatialCompetitionRenderer:
         button_x = width - button_width - 10
         button_y = 10
         self._pause_button_rect = pygame.Rect(button_x, button_y, button_width, button_height)
-        button_color = (80, 120, 80) if self._paused else (60, 60, 80)
+        button_color = t["button_active"] if self._paused else t["button_bg"]
         pygame.draw.rect(self._screen, button_color, self._pause_button_rect, border_radius=4)
-        pygame.draw.rect(self._screen, (100, 100, 120), self._pause_button_rect, 1, border_radius=4)
+        pygame.draw.rect(self._screen, t["button_border"], self._pause_button_rect, 1, border_radius=4)
 
-        pause_text = self._font.render("Resume" if self._paused else "Pause", True, (200, 200, 200))
+        pause_text = self._font.render("Resume" if self._paused else "Pause", True, t["text"])
         text_x = button_x + (button_width - pause_text.get_width()) // 2
         text_y = button_y + (button_height - pause_text.get_height()) // 2
         self._screen.blit(pause_text, (text_x, text_y))
@@ -442,7 +501,7 @@ class SpatialCompetitionRenderer:
         slider_x = value_x - slider_width - 10
         slider_y = 17
         self._slider_rect = pygame.Rect(slider_x, slider_y, slider_width, slider_height)
-        pygame.draw.rect(self._screen, (50, 50, 65), self._slider_rect, border_radius=3)
+        pygame.draw.rect(self._screen, t["slider_bg"], self._slider_rect, border_radius=3)
 
         # Slider handle position (logarithmic: 0.25 -> 0, 1.0 -> ~0.47, 4.0 -> 0.95, MAX -> 1.0)
         if self._speed_multiplier == float("inf"):
@@ -451,7 +510,7 @@ class SpatialCompetitionRenderer:
             handle_pos = float(np.log(self._speed_multiplier / 0.25) / np.log(16) * 0.95)
         handle_x = int(slider_x + handle_pos * slider_width)
         handle_rect = pygame.Rect(handle_x - 4, slider_y - 2, 8, slider_height + 4)
-        pygame.draw.rect(self._screen, (120, 120, 150), handle_rect, border_radius=2)
+        pygame.draw.rect(self._screen, t["slider_handle"], handle_rect, border_radius=2)
 
         # Speed label (left of slider)
         label_x = slider_x - speed_label.get_width() - 8
@@ -459,7 +518,7 @@ class SpatialCompetitionRenderer:
 
         # Paused indicator
         if self._paused:
-            paused_text = self._font.render("PAUSED (Space to resume)", True, (255, 200, 100))
+            paused_text = self._font.render("PAUSED (Space to resume)", True, t["paused_text"])
             self._screen.blit(paused_text, (width // 2 - paused_text.get_width() // 2, 10))
 
     # ---- 1-D rendering ----
@@ -481,14 +540,15 @@ class SpatialCompetitionRenderer:
         line_end = width - margin
         line_length = line_end - line_start
 
+        t = self._theme
         # Draw axis line
-        pygame.draw.line(self._screen, (100, 100, 120), (line_start, line_y), (line_end, line_y), 2)
+        pygame.draw.line(self._screen, t["axis_line"], (line_start, line_y), (line_end, line_y), 2)
 
         # Draw axis markers
         for i in range(11):
             tick_x = line_start + (line_length * i) // 10
-            pygame.draw.line(self._screen, (100, 100, 120), (tick_x, line_y - 5), (tick_x, line_y + 5), 1)
-            label = self._font.render(f"{i / 10:.1f}", True, (150, 150, 150))
+            pygame.draw.line(self._screen, t["axis_line"], (tick_x, line_y - 5), (tick_x, line_y + 5), 1)
+            label = self._font.render(f"{i / 10:.1f}", True, t["tick_label"])
             self._screen.blit(label, (tick_x - label.get_width() // 2, line_y + 15))
 
         # Draw buyers as small dots below the line, colored by purchased seller
@@ -524,7 +584,7 @@ class SpatialCompetitionRenderer:
             if self._env.include_quality:
                 assert self._cached_seller_qualities is not None
                 info_text += f" q={float(self._cached_seller_qualities[seller_idx]):.1f}"
-            price_label = self._font.render(info_text, True, (200, 200, 200))
+            price_label = self._font.render(info_text, True, t["text"])
             self._screen.blit(price_label, (screen_x - price_label.get_width() // 2, line_y - 70))
 
     # ---- 2-D rendering ----
@@ -546,16 +606,17 @@ class SpatialCompetitionRenderer:
         offset_x = legend_width + (available_width - draw_size) // 2
         offset_y = (height - draw_size) // 2
 
+        t = self._theme
         # Draw grid background
-        pygame.draw.rect(self._screen, (40, 40, 55), pygame.Rect(offset_x, offset_y, draw_size, draw_size))
-        pygame.draw.rect(self._screen, (80, 80, 100), pygame.Rect(offset_x, offset_y, draw_size, draw_size), 2)
+        pygame.draw.rect(self._screen, t["grid_bg"], pygame.Rect(offset_x, offset_y, draw_size, draw_size))
+        pygame.draw.rect(self._screen, t["grid_border"], pygame.Rect(offset_x, offset_y, draw_size, draw_size), 2)
 
         # Draw grid lines
         for i in range(11):
             grid_x = offset_x + (draw_size * i) // 10
-            pygame.draw.line(self._screen, (60, 60, 75), (grid_x, offset_y), (grid_x, offset_y + draw_size), 1)
+            pygame.draw.line(self._screen, t["grid_line"], (grid_x, offset_y), (grid_x, offset_y + draw_size), 1)
             grid_y = offset_y + (draw_size * i) // 10
-            pygame.draw.line(self._screen, (60, 60, 75), (offset_x, grid_y), (offset_x + draw_size, grid_y), 1)
+            pygame.draw.line(self._screen, t["grid_line"], (offset_x, grid_y), (offset_x + draw_size, grid_y), 1)
 
         # Draw sellers first (as larger circles with labels)
         seller_radius = 10
@@ -577,7 +638,7 @@ class SpatialCompetitionRenderer:
             if self._env.include_quality:
                 assert self._cached_seller_qualities is not None
                 info_text += f" q={float(self._cached_seller_qualities[seller_idx]):.1f}"
-            price_label = self._font.render(info_text, True, (200, 200, 200))
+            price_label = self._font.render(info_text, True, t["text"])
             self._screen.blit(price_label, (screen_x + 15, screen_y - 10))
 
         # Draw buyers on top (as small dots, colored by purchased seller)
@@ -604,11 +665,12 @@ class SpatialCompetitionRenderer:
         content_x = legend_width + margin
         content_width = width - legend_width - 2 * margin
 
+        t = self._theme
         # Title
-        title = self._font.render(f"{dimensions}D Spatial Competition", True, (200, 200, 200))
+        title = self._font.render(f"{dimensions}D Spatial Competition", True, t["text"])
         self._screen.blit(title, (content_x + (content_width - title.get_width()) // 2, 60))
 
-        subtitle = self._small_font.render("(See leaderboard for rankings)", True, (120, 120, 140))
+        subtitle = self._small_font.render("(See leaderboard for rankings)", True, t["text_muted"])
         self._screen.blit(subtitle, (content_x + (content_width - subtitle.get_width()) // 2, 85))
 
         # Competition stats
@@ -629,19 +691,19 @@ class SpatialCompetitionRenderer:
         box_x = content_x + (content_width - box_width) // 2
         box_y = 120
         box_height = len(stats) * 28 + 20
-        pygame.draw.rect(self._screen, (35, 35, 50), (box_x, box_y, box_width, box_height), border_radius=8)
-        pygame.draw.rect(self._screen, (60, 60, 80), (box_x, box_y, box_width, box_height), 2, border_radius=8)
+        pygame.draw.rect(self._screen, t["panel_bg"], (box_x, box_y, box_width, box_height), border_radius=8)
+        pygame.draw.rect(self._screen, t["panel_border"], (box_x, box_y, box_width, box_height), 2, border_radius=8)
 
         # Draw stats
         for i, (label, value) in enumerate(stats):
             row_y = box_y + 12 + i * 28
-            label_text = self._font.render(label, True, (150, 150, 170))
-            value_text = self._font.render(value, True, (200, 200, 220))
+            label_text = self._font.render(label, True, t["text_secondary"])
+            value_text = self._font.render(value, True, t["text"])
             self._screen.blit(label_text, (box_x + 15, row_y))
             self._screen.blit(value_text, (box_x + box_width - value_text.get_width() - 15, row_y))
 
         # Hint at bottom
-        hint = self._small_font.render("Click leaderboard items for details", True, (100, 100, 120))
+        hint = self._small_font.render("Click leaderboard items for details", True, t["text_muted"])
         self._screen.blit(hint, (content_x + (content_width - hint.get_width()) // 2, height - 40))
 
     # ---- Leaderboard ----
@@ -673,8 +735,9 @@ class SpatialCompetitionRenderer:
         bar_height = 26
         bar_spacing = 4
 
+        t = self._theme
         # Draw chart title
-        title = self._font.render("Top Sellers (by reward)", True, (180, 180, 180))
+        title = self._font.render("Top Sellers (by reward)", True, t["text_secondary"])
         self._screen.blit(title, (chart_x, chart_y - 20))
 
         # Find max reward for scaling (guard against NaN)
@@ -689,7 +752,7 @@ class SpatialCompetitionRenderer:
 
             # Bar background
             bg_rect = pygame.Rect(chart_x, row_y, chart_width, bar_height)
-            pygame.draw.rect(self._screen, (40, 40, 55), bg_rect, border_radius=3)
+            pygame.draw.rect(self._screen, t["bar_bg"], bg_rect, border_radius=3)
             self._leaderboard_items.append((bg_rect, seller_idx, color))
 
             # Highlight if this seller is selected
@@ -699,7 +762,7 @@ class SpatialCompetitionRenderer:
                 and self._selected_entity.entity_idx == seller_idx
             )
             if is_selected:
-                pygame.draw.rect(self._screen, (255, 255, 255), bg_rect, 2, border_radius=3)
+                pygame.draw.rect(self._screen, t["highlight"], bg_rect, 2, border_radius=3)
 
             # Bar fill (proportional to reward)
             ratio = (reward / max_reward) if max_reward > 0 else 0.0
@@ -709,11 +772,12 @@ class SpatialCompetitionRenderer:
                 pygame.draw.rect(self._screen, color, bar_rect, border_radius=2)
 
             # Seller label and reward (vertically centered)
-            label = self._font.render(f"seller_{seller_idx}", True, (255, 255, 255))
+            label_color = t["bg"] if not self._light_mode else (255, 255, 255)
+            label = self._font.render(f"seller_{seller_idx}", True, label_color)
             label_y = row_y + (bar_height - label.get_height()) // 2
             self._screen.blit(label, (chart_x + 5, label_y))
 
-            reward_text = self._font.render(f"{reward:.0f}", True, (200, 200, 200))
+            reward_text = self._font.render(f"{reward:.0f}", True, t["text"])
             reward_y = row_y + (bar_height - reward_text.get_height()) // 2
             self._screen.blit(reward_text, (chart_x + chart_width - reward_text.get_width() - 5, reward_y))
 
@@ -726,7 +790,7 @@ class SpatialCompetitionRenderer:
         if current_pos is None:
             return
         radius = 6 if entity_info.entity_type == "buyer" else 14
-        pygame.draw.circle(self._screen, (255, 255, 255), current_pos, radius, 2)
+        pygame.draw.circle(self._screen, self._theme["highlight"], current_pos, radius, 2)
 
     def _find_entity_screen_pos(self, entity_info: EntityInfo) -> tuple[int, int] | None:
         """Find the current screen position of an entity, or None if not found."""
@@ -833,13 +897,14 @@ class SpatialCompetitionRenderer:
         panel_y = window_height - panel_height - 10
 
         # Draw panel background
+        t = self._theme
         panel_rect = pygame.Rect(panel_x, panel_y, panel_width, panel_height)
-        pygame.draw.rect(self._screen, (45, 45, 60), panel_rect, border_radius=5)
+        pygame.draw.rect(self._screen, t["panel_bg"], panel_rect, border_radius=5)
         pygame.draw.rect(self._screen, entity_info.color, panel_rect, 2, border_radius=5)
 
         # Draw lines
         for i, line in enumerate(lines):
-            text_color = entity_info.color if i == 0 else (200, 200, 200)
+            text_color = entity_info.color if i == 0 else t["text"]
             text = self._font.render(line, True, text_color)
             self._screen.blit(text, (panel_x + padding, panel_y + padding + i * line_height))
 
@@ -872,11 +937,12 @@ class SpatialCompetitionRenderer:
         box_y = max(10, min(box_y, window_height - box_height - 10))
 
         # Draw box
+        t = self._theme
         box_rect = pygame.Rect(box_x, box_y, box_width, box_height)
-        pygame.draw.rect(self._screen, (50, 50, 65), box_rect, border_radius=4)
+        pygame.draw.rect(self._screen, t["info_box_bg"], box_rect, border_radius=4)
         pygame.draw.rect(self._screen, border_color, box_rect, 1, border_radius=4)
 
         # Draw text
         for i, line in enumerate(lines):
-            text = self._small_font.render(line, True, (200, 200, 200))
+            text = self._small_font.render(line, True, t["text"])
             self._screen.blit(text, (box_x + padding, box_y + padding + i * line_height))

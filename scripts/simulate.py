@@ -72,6 +72,11 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="JAX device, e.g. 'cpu', 'gpu', 'gpu:0'",
     )
+    parser.add_argument(
+        "--light",
+        action="store_true",
+        help="Use light-mode rendering (white background, for screenshots)",
+    )
 
     return parser.parse_args()
 
@@ -153,6 +158,7 @@ def main() -> None:
         renderer = SpatialCompetitionRenderer(
             wrapper.env,
             max_env_steps=config.env.max_env_steps,
+            light_mode=args.light,
         )
 
         # ── temperature ───────────────────────────────────────────────

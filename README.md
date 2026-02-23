@@ -3,7 +3,7 @@
 JAX-native environment and MAPPO training pipeline for dynamic spatial competition, inspired by Hotelling's model and extended with multiple horizontal dimensions, vertical differentiation, reservation prices, and non-uniform buyer distributions.
 
 <p align="center">
-  <img src="results/demo.gif" alt="2D spatial competition simulation with 3 sellers" width="700">
+  <img src="docs/demo.gif" alt="2D spatial competition simulation with 3 sellers" width="700">
 </p>
 
 All environment logic is expressed as pure functions over JAX arrays. `jax.jit` and `jax.vmap` work out of the box, enabling GPU-accelerated parallel training across hundreds of environments simultaneously.

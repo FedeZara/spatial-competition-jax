@@ -128,6 +128,26 @@ def parse_args() -> argparse.Namespace:
             "Defaults to JAX default (first available accelerator)."
         ),
     )
+    parser.add_argument(
+        "--resume",
+        type=str,
+        default=None,
+        help="Path to .pkl checkpoint to resume training from.",
+    )
+    parser.add_argument(
+        "--extra-updates",
+        type=int,
+        default=None,
+        help="Number of additional updates to run from the resumed checkpoint. "
+             "If not set, trains up to config.total_updates.",
+    )
+    parser.add_argument(
+        "--fixed-entropy",
+        type=float,
+        default=None,
+        help="Fix entropy coefficient at this value (disables annealing). "
+             "Useful for stability testing after resuming.",
+    )
 
     return parser.parse_args()
 
@@ -272,6 +292,23 @@ def _train(
         seed=config.train.seed,
     )
 
+    # ── resume from checkpoint ─────────────────────────────────────────
+    resume_step = 0
+    if args.resume is not None:
+        from spatial_competition_jax.marl.utils.checkpoints import load_checkpoint
+        ckpt_path = Path(args.resume)
+        if not ckpt_path.is_absolute():
+            ckpt_path = Path(__file__).parent.parent / ckpt_path
+        print(f"Resuming from: {ckpt_path}")
+        ckpt = load_checkpoint(ckpt_path)
+        resume_step = ckpt["step"]
+        device = jax.tree.leaves(agent.train_state.params)[0].devices().pop()
+        agent.train_state = agent.train_state.replace(
+            params=jax.device_put(ckpt["params"], device),
+            opt_state=jax.device_put(ckpt["opt_state"], device),
+        )
+        print(f"  Loaded step {resume_step}, params + optimizer state restored")
+
     _check_device = jax.tree.leaves(agent.train_state.params)[0]
     print(f"Params on:   {_check_device.devices()}")
 
@@ -287,7 +324,12 @@ def _train(
         temp_anneal_frac = config.train.buyer_choice_temp_anneal_frac
         print(f"Temperature annealing: {temp_start} → {temp_end} over {temp_anneal_frac * 100:.0f}% of training")
 
-    use_entropy_anneal = config.train.entropy_coef_start is not None
+    fixed_entropy = args.fixed_entropy
+    if fixed_entropy is not None:
+        use_entropy_anneal = False
+        print(f"Entropy coef: FIXED at {fixed_entropy}")
+    else:
+        use_entropy_anneal = config.train.entropy_coef_start is not None
     if use_entropy_anneal:
         ent_start = config.train.entropy_coef_start
         assert ent_start is not None
@@ -310,11 +352,18 @@ def _train(
     best_eval_reward = float("-inf")
     update = 0
 
-    print("\nStarting training …")
+    start_update = resume_step + 1
+    if args.extra_updates is not None:
+        end_update = resume_step + args.extra_updates
+    else:
+        end_update = config.train.total_updates
+    total_planned = end_update - start_update + 1
+
+    print(f"\nStarting training (updates {start_update}–{end_update}, {total_planned} total) …")
     print("-" * 60)
 
     try:
-        for update in range(1, config.train.total_updates + 1):
+        for update in range(start_update, end_update + 1):
             # ── Annealing ─────────────────────────────────────────
             if use_temp_anneal:
                 assert temp_start is not None
@@ -325,9 +374,11 @@ def _train(
             else:
                 temperature = None
 
-            if use_entropy_anneal:
+            if fixed_entropy is not None:
+                cur_entropy_coef: float | None = fixed_entropy
+            elif use_entropy_anneal:
                 assert ent_start is not None
-                cur_entropy_coef: float | None = linear_anneal(
+                cur_entropy_coef = linear_anneal(
                     update, config.train.total_updates,
                     ent_start, ent_end, ent_anneal_frac,
                 )

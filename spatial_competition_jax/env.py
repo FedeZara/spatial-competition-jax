@@ -443,10 +443,18 @@ class SpatialCompetitionEnv:
 
         Clears the ``buyer_purchased_from`` field and flips the ``valid``
         mask for buyers that made a purchase.
+
+        When ``despawn_no_purchase`` is enabled, *all* buyers from the
+        previous step are removed (both purchased and non-purchased),
+        since non-buyers are kept visible until this phase so that
+        observations can distinguish served from unserved demand.
         """
-        purchased = state.buyer_purchased_from >= 0
+        if self.despawn_no_purchase:
+            remove_mask = state.buyer_valid
+        else:
+            remove_mask = state.buyer_purchased_from >= 0
         return state.replace(  # type: ignore[attr-defined, no-any-return]
-            buyer_valid=state.buyer_valid & ~purchased,
+            buyer_valid=state.buyer_valid & ~remove_mask,
             buyer_purchased_from=jnp.full(self.max_buyers, -1, dtype=jnp.int32),
         )
 
@@ -524,18 +532,13 @@ class SpatialCompetitionEnv:
         move_cost = self.movement_cost * state.seller_last_movement
         rewards = revenue - prod_cost - move_cost
 
-        # Despawn valid buyers who did not purchase this step
-        new_buyer_valid = state.buyer_valid
-        if self.despawn_no_purchase:
-            did_not_buy = state.buyer_valid & (bought_from < 0)
-            new_buyer_valid = state.buyer_valid & ~did_not_buy
-
         # Update state
+        # Note: when despawn_no_purchase is True, non-buyers are kept
+        # visible here and removed in Phase 1 of the *next* step.
         new_step = state.step + 1
         new_state = state.replace(  # type: ignore[attr-defined]
             seller_running_sales=running_sales,
             buyer_purchased_from=bought_from,
-            buyer_valid=new_buyer_valid,
             step=new_step,
         )
 

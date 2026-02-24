@@ -708,12 +708,6 @@ class TrainingWrapper:
             temperature=temperature,
         )
 
-        # Despawn valid buyers who did not purchase this step
-        new_buyer_valid = env_state.buyer_valid
-        if self.env.despawn_no_purchase:
-            did_not_buy = env_state.buyer_valid & (bought_from < 0)
-            new_buyer_valid = env_state.buyer_valid & ~did_not_buy
-
         # Rewards
         revenue = running_sales * env_state.seller_prices
         if self.env.include_quality:
@@ -723,11 +717,13 @@ class TrainingWrapper:
         move_cost = self.env.movement_cost * env_state.seller_last_movement
         rewards = revenue - prod_cost - move_cost
 
+        # Note: when despawn_no_purchase is True, non-buyers are kept
+        # visible here and removed in Phase 1 of the *next* step
+        # (inside step_remove_purchased).
         new_step = env_state.step + 1
         new_env_state = env_state.replace(  # type: ignore[attr-defined]
             seller_running_sales=running_sales,
             buyer_purchased_from=bought_from,
-            buyer_valid=new_buyer_valid,
             step=new_step,
         )
 
@@ -831,12 +827,6 @@ class TrainingWrapper:
             temperature=temperature,
         )
 
-        # Despawn valid buyers who did not purchase this step
-        new_buyer_valid = env_state.buyer_valid
-        if self.env.despawn_no_purchase:
-            did_not_buy = env_state.buyer_valid & (bought_from < 0)
-            new_buyer_valid = env_state.buyer_valid & ~did_not_buy
-
         revenue = running_sales * env_state.seller_prices
         if self.env.include_quality:
             prod_cost = self.env.production_cost_factor * env_state.seller_qualities**2
@@ -845,11 +835,13 @@ class TrainingWrapper:
         move_cost = self.env.movement_cost * env_state.seller_last_movement
         rewards = revenue - prod_cost - move_cost
 
+        # Note: when despawn_no_purchase is True, non-buyers are kept
+        # visible here and removed in Phase 1 of the *next* step
+        # (inside step_remove_purchased).
         new_step = env_state.step + 1
         new_env_state = env_state.replace(  # type: ignore[attr-defined]
             seller_running_sales=running_sales,
             buyer_purchased_from=bought_from,
-            buyer_valid=new_buyer_valid,
             step=new_step,
         )
 

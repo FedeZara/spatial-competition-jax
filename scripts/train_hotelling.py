@@ -406,6 +406,9 @@ def _train(
                     eval_print["dist"] = eval_stats["eval_seller_distance"]
                 eval_print["price"] = eval_stats["eval_price_mean"]
                 eval_print["spread"] = eval_stats["eval_price_spread"]
+                if "eval_quality_mean" in eval_stats:
+                    eval_print["quality"] = eval_stats["eval_quality_mean"]
+                    eval_print["q_spread"] = eval_stats["eval_quality_spread"]
                 # Per-agent rewards
                 for a in range(wrapper.num_agents):
                     eval_print[f"r{a}"] = eval_stats[f"eval_reward_agent_{a}"]
@@ -487,10 +490,15 @@ def _train(
     print(f"  Price:    {final_eval['eval_price_mean']:.2f}")
     if "eval_seller_distance" in final_eval:
         print(f"  Distance: {final_eval['eval_seller_distance']:.3f}")
+    if "eval_quality_mean" in final_eval:
+        print(f"  Quality:  {final_eval['eval_quality_mean']:.2f} ± {final_eval['eval_quality_spread']:.2f}")
     for a in range(wrapper.num_agents):
-        print(f"  Agent {a}: reward={final_eval[f'eval_reward_agent_{a}']:.2f} "
-              f"price={final_eval[f'eval_price_agent_{a}']:.2f} "
-              f"share={final_eval[f'eval_market_share_agent_{a}']:.1%}")
+        line = f"  Agent {a}: reward={final_eval[f'eval_reward_agent_{a}']:.2f} " \
+               f"price={final_eval[f'eval_price_agent_{a}']:.2f} " \
+               f"share={final_eval[f'eval_market_share_agent_{a}']:.1%}"
+        if f"eval_quality_agent_{a}" in final_eval:
+            line += f" quality={final_eval[f'eval_quality_agent_{a}']:.2f}"
+        print(line)
 
     train_log.close()
     eval_log.close()

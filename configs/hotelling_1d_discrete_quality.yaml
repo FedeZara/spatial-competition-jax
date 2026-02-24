@@ -1,0 +1,22 @@
+# Economides (1989) "Quality Variations and Maximal Variety Differentiation"
+# 1D linear city with quality as strategic variable alongside location and price.
+#
+# Key features of the model:
+# - Quality uniformly increases consumers' willingness to pay (homogeneous taste)
+# - Convex production cost: C(q) = γ·q²
+# - Quadratic transport costs (d'Aspremont) for equilibrium existence
+# - Analytical equilibrium: maximal location differentiation (firms at ends),
+#   minimal quality differentiation (same quality, same price)
+#
+# Compare learned policies to the theoretical prediction.
+
+_parent: hotelling_1d_discrete_quadratic.yaml
+
+# ── Quality (Economides 1989) ───────────────────────────────────────────
+include_quality: true
+quality_taste: 1.0              # Homogeneous: all consumers value quality equally
+production_cost_factor: 3       # Convex cost γ·q²
+num_quality_bins: 11            # Quality action dimension
+
+# Full market coverage (Economides assumes no abstention)
+include_buyer_valuation: false

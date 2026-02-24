@@ -1,0 +1,7 @@
+# 2D discrete + medium buyer valuation (uniform buyers)
+# alpha = t/v = 10/6 ≈ 1.67 — quartile equilibrium regime
+
+_parent: hotelling_2d_discrete.yaml
+
+include_buyer_valuation: true
+buyer_value: 6.0

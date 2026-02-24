@@ -92,8 +92,9 @@ def _eval_episodes_jit(
             / wrapper.space_resolution
         )
         prices = final_env_state.seller_prices
+        qualities = final_env_state.seller_qualities
 
-        return total_reward, positions, prices, total_sales
+        return total_reward, positions, prices, total_sales, qualities
 
     return jax.vmap(run_one)(keys)
 
@@ -120,11 +121,13 @@ def evaluate_policy(
     temp_arr = jnp.float32(temperature if temperature is not None else 0.0)
     keys = jax.random.split(key, num_episodes)
 
-    total_rewards, all_positions, all_prices, total_sales = _eval_episodes_jit(
+    total_rewards, all_positions, all_prices, total_sales, all_qualities = _eval_episodes_jit(
         policy, wrapper, params, keys, deterministic, use_temp, temp_arr,
     )
 
-    return _build_eval_results(total_rewards, all_positions, all_prices, total_sales, wrapper)
+    return _build_eval_results(
+        total_rewards, all_positions, all_prices, total_sales, wrapper, all_qualities
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -205,7 +208,8 @@ def _eval_ego_episodes_jit(
             / wrapper.space_resolution
         )
         prices = final_env_state.seller_prices
-        return total_reward, positions, prices, total_sales
+        qualities = final_env_state.seller_qualities
+        return total_reward, positions, prices, total_sales, qualities
 
     return jax.vmap(run_one)(keys)
 
@@ -230,12 +234,14 @@ def evaluate_ego_policy(
     temp_arr = jnp.float32(temperature if temperature is not None else 0.0)
     keys = jax.random.split(key, num_episodes)
 
-    total_rewards, all_positions, all_prices, total_sales = _eval_ego_episodes_jit(
+    total_rewards, all_positions, all_prices, total_sales, all_qualities = _eval_ego_episodes_jit(
         network, wrapper, params, keys, deterministic, use_temp,
         is_discrete, is_factored, is_2d_factored, temp_arr,
     )
 
-    return _build_eval_results(total_rewards, all_positions, all_prices, total_sales, wrapper)
+    return _build_eval_results(
+        total_rewards, all_positions, all_prices, total_sales, wrapper, all_qualities
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -249,6 +255,7 @@ def _build_eval_results(
     all_prices: jnp.ndarray,
     total_sales: jnp.ndarray,
     wrapper: TrainingWrapper,
+    all_qualities: jnp.ndarray | None = None,
 ) -> dict[str, float]:
     """Build a comprehensive results dict from raw eval arrays.
 
@@ -258,6 +265,7 @@ def _build_eval_results(
         all_prices: ``(E, A)`` final prices.
         total_sales: ``(E, A)`` total sales per agent.
         wrapper: Training wrapper (for num_agents, dimensions).
+        all_qualities: ``(E, A)`` final qualities (when include_quality).
 
     Returns:
         Dictionary of evaluation metrics.
@@ -292,6 +300,13 @@ def _build_eval_results(
     results["eval_price_spread"] = float(all_prices.mean(axis=0).std())
     for a in range(A):
         results[f"eval_price_agent_{a}"] = float(all_prices[:, a].mean())
+
+    # ── Per-agent qualities (when include_quality) ─────────────────────
+    if wrapper.include_quality and all_qualities is not None:
+        results["eval_quality_mean"] = float(all_qualities.mean())
+        results["eval_quality_spread"] = float(all_qualities.mean(axis=0).std())
+        for a in range(A):
+            results[f"eval_quality_agent_{a}"] = float(all_qualities[:, a].mean())
 
     # ── Sales / market share ──────────────────────────────────────────
     total_sales_all = total_sales.sum(axis=-1)  # (E,)

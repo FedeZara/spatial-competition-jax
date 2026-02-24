@@ -1,0 +1,6 @@
+# 2D discrete + medium buyer valuation + Gaussian mixture buyers (two corners)
+
+_parent: hotelling_2d_discrete_mixture.yaml
+
+include_buyer_valuation: true
+buyer_value: 6.0

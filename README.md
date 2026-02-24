@@ -562,6 +562,69 @@ spatial-competition-jax/
     └── test_basic.py
 ```
 
+## Reproducing Thesis Experiments
+
+All experiments from the thesis *Multi-Agent Reinforcement Learning for Spatial Competition* can be reproduced using the config files in `configs/`. Each command trains a single scenario for 500,000 updates (unless noted otherwise).
+
+### One-Dimensional Experiments
+
+| Scenario | Config | Command |
+| --- | --- | --- |
+| Baseline (linear transport) | `hotelling_1d_discrete.yaml` | `python scripts/train_hotelling.py --config configs/hotelling_1d_discrete.yaml` |
+| Quadratic transport (d'Aspremont) | `hotelling_1d_discrete_quadratic.yaml` | `python scripts/train_hotelling.py --config configs/hotelling_1d_discrete_quadratic.yaml` |
+| Low reservation price (v=3) | `hotelling_1d_discrete_val_low.yaml` | `python scripts/train_hotelling.py --config configs/hotelling_1d_discrete_val_low.yaml` |
+| Medium reservation price (v=6) | `hotelling_1d_discrete_val_med.yaml` | `python scripts/train_hotelling.py --config configs/hotelling_1d_discrete_val_med.yaml` |
+| High reservation price (v=8) | `hotelling_1d_discrete_val_high.yaml` | `python scripts/train_hotelling.py --config configs/hotelling_1d_discrete_val_high.yaml` |
+| High reservation price (extended, 1M steps) | `hotelling_1d_discrete_val_high_long.yaml` | `python scripts/train_hotelling.py --config configs/hotelling_1d_discrete_val_high_long.yaml` |
+
+### Two-Dimensional Experiments
+
+| Scenario | Config | Command |
+| --- | --- | --- |
+| Baseline (2 sellers, uniform) | `hotelling_2d_discrete.yaml` | `python scripts/train_hotelling.py --config configs/hotelling_2d_discrete.yaml` |
+| Gaussian centre | `hotelling_2d_discrete_gaussian_center.yaml` | `python scripts/train_hotelling.py --config configs/hotelling_2d_discrete_gaussian_center.yaml` |
+| Two clusters | `hotelling_2d_discrete_mixture.yaml` | `python scripts/train_hotelling.py --config configs/hotelling_2d_discrete_mixture.yaml` |
+| 3 sellers, uniform | `hotelling_2d_discrete_3sellers.yaml` | `python scripts/train_hotelling.py --config configs/hotelling_2d_discrete_3sellers.yaml` |
+| 3 sellers, 3 clusters | `hotelling_2d_discrete_3sellers_mixture.yaml` | `python scripts/train_hotelling.py --config configs/hotelling_2d_discrete_3sellers_mixture.yaml` |
+| 2 sellers, uniform, v=6 | `hotelling_2d_discrete_val_med.yaml` | `python scripts/train_hotelling.py --config configs/hotelling_2d_discrete_val_med.yaml` |
+| 2 sellers, 2 clusters, v=6 | `hotelling_2d_discrete_val_med_mixture.yaml` | `python scripts/train_hotelling.py --config configs/hotelling_2d_discrete_val_med_mixture.yaml` |
+| 3 sellers, 2 clusters, v=6 | `hotelling_2d_discrete_val_med_3sellers_2gaussians.yaml` | `python scripts/train_hotelling.py --config configs/hotelling_2d_discrete_val_med_3sellers_2gaussians.yaml` |
+
+### Visualising Results
+
+After training, visualise any checkpoint with the interactive renderer:
+
+```bash
+python scripts/simulate.py \
+    --checkpoint results/<experiment>/best_model.pkl \
+    --config configs/<scenario>.yaml \
+    --light  # optional: white background for screenshots
+```
+
+### Running All Experiments
+
+To run all 1D and 2D experiments sequentially:
+
+```bash
+for config in \
+    hotelling_1d_discrete \
+    hotelling_1d_discrete_quadratic \
+    hotelling_1d_discrete_val_low \
+    hotelling_1d_discrete_val_med \
+    hotelling_1d_discrete_val_high \
+    hotelling_1d_discrete_val_high_long \
+    hotelling_2d_discrete \
+    hotelling_2d_discrete_gaussian_center \
+    hotelling_2d_discrete_mixture \
+    hotelling_2d_discrete_3sellers \
+    hotelling_2d_discrete_3sellers_mixture \
+    hotelling_2d_discrete_val_med \
+    hotelling_2d_discrete_val_med_mixture \
+    hotelling_2d_discrete_val_med_3sellers_2gaussians; do
+    python scripts/train_hotelling.py --config "configs/${config}.yaml"
+done
+```
+
 ## License
 
 MIT -- see [LICENSE](LICENSE).

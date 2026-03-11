@@ -68,6 +68,7 @@ def build_policy(config: Config, wrapper: TrainingWrapper) -> PolicyAdapter:
 
     # ── 1D discrete + conv_bin → factored (loc × price [× quality])
     if ego and discrete and conv_bin:
+        gp = wrapper.space_resolution + 1
         scalar_dim = wrapper.dimensions + 1
         if wrapper.include_quality:
             scalar_dim += 1
@@ -75,7 +76,7 @@ def build_policy(config: Config, wrapper: TrainingWrapper) -> PolicyAdapter:
             num_location_bins=wrapper.num_location_bins,
             num_price_bins=wrapper.num_price_bins,
             num_quality_bins=wrapper.num_quality_bins,
-            spatial_resolution=wrapper.space_resolution,
+            spatial_resolution=gp,
             num_grid_channels=wrapper._conv_grid_channels,
             num_scalar_features=scalar_dim,
             mlp_hidden_dims=hidden_dims,
